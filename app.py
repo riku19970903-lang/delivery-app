@@ -1236,5 +1236,9 @@ def admin_safety_print(request: Request, ym: Optional[str] = None, member_id: Op
     return render(
         request,
         "safety_print.html",
+        
         {"records": records, "ym": start.strftime("%Y-%m"), "period": f"{start.isoformat()} ～ {end.isoformat()}", "member": member},
     )
+@app.get("/login")
+def login(request: Request):
+    return templates.TemplateResponse("login.html", {"request": request})
