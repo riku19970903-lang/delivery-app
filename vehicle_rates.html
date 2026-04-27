@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>車両貸出料金</h1>
+<form method="post" class="panel formgrid">
+  <label>1日貸し料金<input type="number" name="daily_fee" value="{{ rates.daily_fee }}" required></label>
+  <label>月貸し料金<input type="number" name="monthly_fee" value="{{ rates.monthly_fee }}" required></label>
+  <button class="primary">保存</button>
+</form>
+{% endblock %}

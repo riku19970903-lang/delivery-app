@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ user.name }}さんのホーム</h1>
+<div class="grid stats">
+  <div class="tile"><span>本日の報酬見込み</span><strong>{{ "{:,}".format(reward) }}円</strong></div>
+  <div class="tile"><span>本日のシフト</span><strong>{{ shift.status if shift else "未決定" }}</strong></div>
+</div>
+<section class="comment">{{ comment }}</section>
+<div class="actions"><a class="button primary" href="/work-log">出勤・退勤を入力</a><a class="button primary" href="/deliveries">配達個数を入力</a><a class="button" href="/rewards">月間報酬を見る</a></div>
+{% endblock %}

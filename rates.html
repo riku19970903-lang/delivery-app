@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>単価・車両貸出設定（管理者専用）</h1>
+<p class="notice">個人ごとの単価と車両料金はプライバシー情報です。この画面は管理者だけが表示できます。</p>
+{% for r in rows %}
+<form method="post" class="panel formgrid rates">
+  <input type="hidden" name="user_id" value="{{ r.id }}">
+  <h2>{{ r.name }}</h2>
+  <label>配達単価<input type="number" name="delivery_unit" value="{{ r.delivery_unit }}" required></label>
+  <label>転送単価<input type="number" name="transfer_unit" value="{{ r.transfer_unit }}" required></label>
+  <label>夜間料金<input type="number" name="night_unit" value="{{ r.night_unit }}" required></label>
+  <label>集荷料金<input type="number" name="pickup_unit" value="{{ r.pickup_unit }}" required></label>
+  <label>大型料金<input type="number" name="large_unit" value="{{ r.large_unit }}" required></label>
+  <label>車両貸出タイプ
+    <select name="vehicle_rental_type">
+      <option value="none" {% if r.vehicle_rental_type == "none" %}selected{% endif %}>なし</option>
+      <option value="daily" {% if r.vehicle_rental_type == "daily" %}selected{% endif %}>日貸し</option>
+      <option value="monthly" {% if r.vehicle_rental_type == "monthly" %}selected{% endif %}>月貸し</option>
+    </select>
+  </label>
+  <label>日貸し料金<input type="number" name="vehicle_daily_fee" value="{{ r.vehicle_daily_fee or 0 }}" min="0"></label>
+  <label>月貸し料金<input type="number" name="vehicle_monthly_fee" value="{{ r.vehicle_monthly_fee or 0 }}" min="0"></label>
+  <button class="primary">保存</button>
+</form>
+{% endfor %}
+{% endblock %}

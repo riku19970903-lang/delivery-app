@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>メンバー登録・編集</h1>
+{% if error %}<p class="alert">{{ error }}</p>{% endif %}
+{% if message %}<p class="success">{{ message }}</p>{% endif %}
+<section class="panel">
+<form method="post" class="formgrid">
+  <label>編集ID（新規は空）<input name="member_id" placeholder="下の表のID"></label>
+  <label>名前<input name="name" required></label>
+  <label>ログインID<input name="username" required></label>
+  <label>パスワード<input name="password" placeholder="変更時だけ入力"></label>
+  <label>電話<input name="phone"></label>
+  <label>車両<input name="vehicle"></label>
+  <button class="primary">保存</button>
+</form>
+</section>
+
+<section class="panel tablewrap">
+  <h2>在籍中メンバー</h2>
+  <table>
+    <tr><th>ID</th><th>名前</th><th>ログインID</th><th>電話</th><th>車両</th><th>状態</th><th></th></tr>
+    {% for m in active_members %}
+    <tr>
+      <td>{{ m.id }}</td><td>{{ m.name }}</td><td>{{ m.username }}</td><td>{{ m.phone }}</td><td>{{ m.vehicle }}</td><td>在籍中</td>
+      <td>
+        <form method="post" action="/admin/members/{{ m.id }}/delete" onsubmit="return confirm('{{ m.name }}さんを退職扱いにします。ログインできなくなりますが、過去記録は残ります。実行しますか？');">
+          <button class="danger">削除（退職扱い）</button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">在籍中メンバーはいません。</td></tr>
+    {% endfor %}
+  </table>
+</section>
+
+<section class="panel tablewrap">
+  <h2>退職済みメンバー</h2>
+  <table>
+    <tr><th>ID</th><th>名前</th><th>ログインID</th><th>電話</th><th>車両</th><th>状態</th><th></th></tr>
+    {% for m in retired_members %}
+    <tr>
+      <td>{{ m.id }}</td><td>{{ m.name }}</td><td>{{ m.username }}</td><td>{{ m.phone }}</td><td>{{ m.vehicle }}</td><td>退職済み</td>
+      <td>
+        <form method="post" action="/admin/members/{{ m.id }}/purge" onsubmit="return confirm('本当にこのメンバーを完全削除してもよろしいですか？\nこの操作は取り消せません。');">
+          <button class="danger">完全削除</button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">退職済みメンバーはいません。</td></tr>
+    {% endfor %}
+  </table>
+</section>
+{% endblock %}

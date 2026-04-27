@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>配達エリア管理</h1>
+<p class="notice">将来は拠点を増やして「光ヶ丘郵便局」「玉川郵便局」などに分けられる設計です。現在は地区と町会を管理します。</p>
+
+<div class="grid two">
+  <section class="panel">
+    <h2>地区を追加・編集</h2>
+    <form method="post" action="/admin/areas/districts" class="formgrid">
+      <label>編集ID（新規は空）<input name="district_id" placeholder="下の表のID"></label>
+      <label>拠点
+        <select name="depot_id">
+          {% for p in depots %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>地区名<input name="name" placeholder="例: 高松" required></label>
+      <button class="primary">地区を保存</button>
+    </form>
+  </section>
+  <section class="panel">
+    <h2>町会を追加・編集</h2>
+    <form method="post" action="/admin/areas/towns" class="formgrid">
+      <label>編集ID（新規は空）<input name="town_id" placeholder="下の表のID"></label>
+      <label>地区
+        <select name="district_id">
+          {% for d in districts %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>町会名<input name="name" placeholder="例: 高松1丁目" required></label>
+      <button class="primary">町会を保存</button>
+    </form>
+  </section>
+</div>
+
+<div class="grid two">
+  <section class="panel tablewrap">
+    <h2>地区一覧</h2>
+    <table><tr><th>ID</th><th>拠点</th><th>地区</th><th></th></tr>
+      {% for d in districts %}
+      <tr><td>{{ d.id }}</td><td>{{ d.depot_name }}</td><td>{{ d.name }}</td><td><form method="post" action="/admin/areas/districts/{{ d.id }}/delete"><button class="danger">削除</button></form></td></tr>
+      {% endfor %}
+    </table>
+  </section>
+  <section class="panel tablewrap">
+    <h2>町会一覧</h2>
+    <table><tr><th>ID</th><th>地区</th><th>町会</th><th></th></tr>
+      {% for t in towns %}
+      <tr><td>{{ t.id }}</td><td>{{ t.district_name }}</td><td>{{ t.name }}</td><td><form method="post" action="/admin/areas/towns/{{ t.id }}/delete"><button class="danger">削除</button></form></td></tr>
+      {% endfor %}
+    </table>
+  </section>
+</div>
+{% endblock %}

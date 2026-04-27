@@ -1,0 +1,4 @@
+<div class="tablewrap"><table><tr><th>名前</th><th>日付</th><th>完了</th><th>転送</th><th>夜間</th><th>集荷</th><th>大型</th><th>点検表</th></tr>
+{% for d in deliveries or rows %}
+<tr><td>{{ d.name }}</td><td>{{ d.work_date }}</td><td>{{ d.completed }}</td><td>{{ d.transfer }}</td><td>{{ d.night }}</td><td>{{ d.pickup }}</td><td>{{ d.large }}</td><td>{% if d.slip_path %}<a href="{{ d.slip_path }}" target="_blank"><img class="thumb" src="{{ d.slip_path }}" alt="点検表"></a><br><span class="success mini-badge">点検表あり</span>{% else %}<span class="alert mini-badge">点検表なし</span>{% endif %}</td></tr>
+{% else %}<tr><td colspan="8">まだ入力がありません。</td></tr>{% endfor %}</table></div>

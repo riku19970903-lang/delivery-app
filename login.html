@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div>
+    <p class="eyebrow">ローカルMVP</p>
+    <h1>配送の毎日を、見やすく、明るく。</h1>
+    <p>出退勤、点呼、配達個数、報酬見込み、休み希望、シフトをまとめて管理できます。</p>
+  </div>
+  <form class="panel login" method="post" action="/login">
+    <h2>ログイン</h2>
+    {% if error %}<p class="alert">{{ error }}</p>{% endif %}
+    <label>ID<input name="username" required autocomplete="username"></label>
+    <label>パスワード<input name="password" type="password" required autocomplete="current-password"></label>
+    <button class="primary">ログイン</button>
+    <p class="hint">管理者: admin / admin123<br>メンバー: sato / member123</p>
+  </form>
+</section>
+{% endblock %}

@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>配達個数一覧</h1>
+<form class="toolbar"><label>日付<input type="date" name="day" value="{{ target }}"></label><button>表示</button></form>
+<section class="panel">{% include "parts_delivery_table.html" %}</section>
+{% endblock %}

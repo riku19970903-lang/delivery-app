@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>日別・月別の売上・報酬見込み</h1>
+<form class="toolbar">
+  <label>月<input type="month" name="ym" value="{{ ym }}"></label>
+  {% if user.role == 'admin' %}<label>メンバー<select name="member_id">{% for m in members %}<option value="{{ m.id }}" {% if m.id == member_id %}selected{% endif %}>{{ m.name }}</option>{% endfor %}</select></label>{% endif %}
+  <button>表示</button>
+</form>
+<div class="tile total"><span>月間報酬見込み</span><strong>{{ "{:,}".format(total) }}円</strong></div>
+<section class="panel tablewrap"><table><tr><th>日付</th><th>完了</th><th>転送</th><th>夜間</th><th>集荷</th><th>大型</th><th>報酬</th></tr>
+{% for d in daily %}<tr><td>{{ d.row.work_date }}</td><td>{{ d.row.completed }}</td><td>{{ d.row.transfer }}</td><td>{{ d.row.night }}</td><td>{{ d.row.pickup }}</td><td>{{ d.row.large }}</td><td>{{ "{:,}".format(d.reward) }}円</td></tr>{% else %}<tr><td colspan="7">データがありません。</td></tr>{% endfor %}
+</table></section>
+{% endblock %}

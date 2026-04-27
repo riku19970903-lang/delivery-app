@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>点検表アップロード</h1>
+<section class="panel">
+  <form method="post" action="/inspection-sheets" enctype="multipart/form-data" class="formgrid">
+    <label>日付<input type="date" name="sheet_date" value="{{ target }}" required></label>
+    <label>メンバー名<input value="{{ user.name }}" readonly></label>
+    <label>画像ファイル<input type="file" name="image" accept="image/*" capture="environment" required></label>
+    <button class="primary">アップロード</button>
+  </form>
+</section>
+
+<section class="panel tablewrap">
+  <h2>自分の提出履歴</h2>
+  <table>
+    <tr><th>日付</th><th>画像</th><th>OCR状態</th><th>登録日時</th></tr>
+    {% for s in sheets %}
+    <tr>
+      <td>{{ s.sheet_date }}</td>
+      <td><a href="{{ s.file_path }}" target="_blank"><img class="thumb" src="{{ s.file_path }}" alt="点検表"></a></td>
+      <td>{{ s.ocr_status }}</td>
+      <td>{{ s.created_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4">まだ提出がありません。</td></tr>
+    {% endfor %}
+  </table>
+</section>
+{% endblock %}

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>来月の休み希望{{ "一覧" if user.role == "admin" else "入力" }}</h1>
+
+{% if user.role != 'admin' %}
+<form method="post" class="panel formgrid"><label>希望日<input type="date" name="request_date" required></label><label>理由・メモ<input name="reason"></label><button class="primary">希望を出す</button></form>
+<section class="panel tablewrap"><table><tr><th>希望日</th><th>理由</th></tr>
+{% for r in rows %}<tr><td>{{ r.request_date }}</td><td>{{ r.reason }}</td></tr>{% else %}<tr><td colspan="2">まだありません。</td></tr>{% endfor %}
+</table></section>
+{% else %}
+<form class="toolbar"><label>対象年月<input type="month" name="ym" value="{{ ym }}"></label><button>表示</button></form>
+<section class="panel">
+  <div class="holiday-calendar">
+    {% for day in days %}
+    {% set key = day.isoformat() %}
+    <div class="holiday-day {{ 'sun' if day.weekday() == 6 else '' }} {{ 'sat' if day.weekday() == 5 else '' }} {{ 'holiday' if key in holiday_dates else '' }}">
+      <div class="holiday-date">{{ day.day }}</div>
+      {% for r in rows_by_date.get(key, []) %}
+      <button type="button" class="holiday-name" data-name="{{ r.name }}" data-date="{{ r.request_date }}" data-reason="{{ r.reason }}">{{ r.name }}</button>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+<section class="panel detail-box" id="holiday-detail">
+  <h2>休み希望詳細</h2>
+  <p>カレンダー上の名前を押すと理由を確認できます。</p>
+</section>
+<script>
+  const detail = document.getElementById("holiday-detail");
+  document.querySelectorAll(".holiday-name").forEach((button) => {
+    button.addEventListener("click", () => {
+      detail.innerHTML = `<h2>休み希望詳細</h2><p><b>名前:</b> ${button.dataset.name}</p><p><b>休み希望日:</b> ${button.dataset.date}</p><p><b>理由:</b> ${button.dataset.reason || "未入力"}</p>`;
+      detail.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+</script>
+{% endif %}
+{% endblock %}

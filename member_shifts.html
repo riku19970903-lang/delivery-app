@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>シフト確認</h1>
+<form class="toolbar"><label>月<input type="month" name="ym" value="{{ ym }}"></label><button>表示</button></form>
+
+<section class="panel">
+  <div class="shift-calendar member-calendar">
+    {% for day in days %}
+    {% set day_key = day.isoformat() %}
+    <div class="shift-day readonly {% if day_key == today %}today-cell{% endif %}">
+      {% if day_key == today %}<span class="today-label">今日</span>{% endif %}
+      <span class="daynum">{{ day.day }}</span>
+      <span class="weekday">{{ day.strftime("%a") }}</span>
+      {% for s in shifts_by_date.get(day_key, []) %}
+      <span class="member-shift {{ 'rest' if s.status == '休み' else '' }}">
+        <b>{{ s.status }}</b>
+        {% if s.status != "休み" and s.area_short_text %}
+        <span title="{{ s.area_text }}">{{ s.area_short_text }}</span>
+        <details><summary>詳細</summary>{{ s.area_text }}</details>
+        {% endif %}
+      </span>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="panel tablewrap">
+  <h2>一覧</h2>
+  <table>
+    <tr><th>日付</th><th>出勤区分</th><th>町会・配達エリア</th></tr>
+    {% for s in shifts %}
+    <tr><td>{{ s.shift_date }}</td><td>{{ s.status }}</td><td>{% if s.status != "休み" %}<b>{{ s.area_short_text }}</b><br><span class="hint">{{ s.area_text }}</span>{% endif %}</td></tr>
+    {% else %}
+    <tr><td colspan="3">決定済みシフトはまだありません。</td></tr>
+    {% endfor %}
+  </table>
+</section>
+{% endblock %}

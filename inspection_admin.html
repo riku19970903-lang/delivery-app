@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>点検表一覧</h1>
+<form class="toolbar">
+  <label>日付<input type="date" name="day" value="{{ target }}"></label>
+  <label>メンバー
+    <select name="member_id">
+      <option value="">全員</option>
+      {% for m in members %}<option value="{{ m.id }}" {% if member_id == m.id %}selected{% endif %}>{{ m.name }}</option>{% endfor %}
+    </select>
+  </label>
+  <button>表示</button>
+</form>
+
+<section class="panel">
+  <h2>未提出メンバー</h2>
+  <div class="missing-list">
+    {% for m in missing_members %}<span>{{ m.name }}</span>{% else %}<span class="success">全員提出済みです</span>{% endfor %}
+  </div>
+</section>
+
+<section class="panel tablewrap">
+  <h2>提出済み</h2>
+  <table>
+    <tr><th>日付</th><th>メンバー</th><th>画像</th><th>OCR状態</th><th>登録日時</th></tr>
+    {% for s in sheets %}
+    <tr>
+      <td>{{ s.sheet_date }}</td>
+      <td>{{ s.name }}</td>
+      <td><a href="{{ s.file_path }}" target="_blank"><img class="thumb large-thumb" src="{{ s.file_path }}" alt="点検表"></a></td>
+      <td>{{ s.ocr_status }}</td>
+      <td>{{ s.created_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5">提出はありません。</td></tr>
+    {% endfor %}
+  </table>
+</section>
+{% endblock %}

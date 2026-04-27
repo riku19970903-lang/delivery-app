@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>配達個数入力</h1>
+<form method="post" class="panel formgrid" enctype="multipart/form-data">
+  <label>日付<input type="date" name="work_date" value="{{ target }}" required></label>
+  <label>配達完了個数<input type="number" name="completed" value="{{ delivery.completed if delivery else 0 }}" min="0"></label>
+  <label>転送個数<input type="number" name="transfer" value="{{ delivery.transfer if delivery else 0 }}" min="0"></label>
+  <label>夜間個数<input type="number" name="night" value="{{ delivery.night if delivery else 0 }}" min="0"></label>
+  <label>集荷個数<input type="number" name="pickup" value="{{ delivery.pickup if delivery else 0 }}" min="0"></label>
+  <label>大型個数<input type="number" name="large" value="{{ delivery.large if delivery else 0 }}" min="0"></label>
+  <input type="hidden" name="vehicle_rental" value="none">
+  <label>メモ<textarea name="memo">{{ delivery.memo if delivery else "" }}</textarea></label>
+  <label>点検表画像アップロード
+    <input id="inspection-image" type="file" name="inspection_image" accept="image/jpeg,image/png,image/webp" capture="environment">
+  </label>
+  <div class="preview-box">
+    <p class="field-title">プレビュー</p>
+    {% if slip %}
+    <a href="{{ slip.file_path }}" target="_blank"><img id="inspection-preview" class="thumb large-thumb" src="{{ slip.file_path }}" alt="点検表"></a>
+    {% else %}
+    <img id="inspection-preview" class="thumb large-thumb hidden" alt="点検表プレビュー">
+    <p id="inspection-empty" class="hint">画像を選択するとここに表示されます。</p>
+    {% endif %}
+  </div>
+  <button class="primary">保存して報酬を見る</button>
+</form>
+<section class="comment">日別報酬見込み: <b>{{ "{:,}".format(reward) }}円</b><br>{{ comment }}</section>
+<script>
+  const imageInput = document.getElementById("inspection-image");
+  const preview = document.getElementById("inspection-preview");
+  const empty = document.getElementById("inspection-empty");
+  if (imageInput && preview) {
+    imageInput.addEventListener("change", () => {
+      const file = imageInput.files && imageInput.files[0];
+      if (!file) return;
+      preview.src = URL.createObjectURL(file);
+      preview.classList.remove("hidden");
+      if (empty) empty.style.display = "none";
+    });
+  }
+</script>
+{% endblock %}

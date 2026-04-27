@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>管理者ダッシュボード</h1>
+<div class="grid stats">
+  <div class="tile"><span>登録メンバー</span><strong>{{ members|length }}名</strong></div>
+  <div class="tile"><span>本日の点呼記録</span><strong>{{ logs|length }}件</strong></div>
+  <div class="tile"><span>本日の配達入力</span><strong>{{ deliveries|length }}件</strong></div>
+</div>
+<div class="grid two">
+  <section class="panel"><h2>本日の配達個数</h2>{% include "parts_delivery_table.html" %}</section>
+  <section class="panel"><h2>車両不具合 最新</h2>{% for i in issues %}<p class="rowline"><b>{{ i.name }}</b> {{ i.issue_date }} {{ i.severity }}<br>{{ i.detail }}</p>{% else %}<p>未登録です。</p>{% endfor %}</section>
+</div>
+{% endblock %}

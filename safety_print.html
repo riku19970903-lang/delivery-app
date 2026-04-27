@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>運転日報 {{ ym }}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="daily-report-body">
+  <div class="print-toolbar">
+    <button class="primary" onclick="window.print()">PDFとして保存・印刷</button>
+  </div>
+  <section class="daily-report-page">
+    <div class="report-head">
+      <h1>運転日報</h1>
+      <p>期間: {{ period }}</p>
+      <p>運転者: {{ member.name if member else "" }}</p>
+    </div>
+    <table class="daily-report-table">
+      <thead>
+        <tr>
+          <th>日付</th>
+          <th>車両番号</th>
+          <th>車両状態</th>
+          <th>点呼</th>
+          <th>アルコール<br>確認</th>
+          <th>開始<br>時刻</th>
+          <th>終了<br>時刻</th>
+          <th>開始地点</th>
+          <th>終了地点</th>
+          <th>走行<br>距離</th>
+          <th>経由地点</th>
+          <th>備考</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in records %}
+        <tr>
+          <td>{{ r.date }}</td>
+          <td>{{ r.vehicle_number }}</td>
+          <td>{{ r.vehicle_status }}</td>
+          <td>{{ r.roll_call }}</td>
+          <td>{{ r.alcohol }}</td>
+          <td>{{ r.start_time }}</td>
+          <td>{{ r.end_time }}</td>
+          <td>{{ r.start_point }}</td>
+          <td>{{ r.end_point }}</td>
+          <td>{{ r.distance }}</td>
+          <td>{{ r.via }}</td>
+          <td>{{ r.notes }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+</body>
+</html>

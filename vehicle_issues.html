@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>車両不具合{{ "一覧" if user.role == "admin" else "入力" }}</h1>
+{% if user.role != 'admin' %}
+<form method="post" class="panel formgrid">
+  <label>日付<input type="date" name="issue_date" value="{{ today }}" required></label>
+  <label>車両名<input name="vehicle_name" value="{{ user.vehicle }}" required></label>
+  <label>重要度<select name="severity"><option>低</option><option>中</option><option>高</option></select></label>
+  <label>内容<textarea name="detail" required></textarea></label>
+  <button class="primary">報告する</button>
+</form>
+{% endif %}
+<section class="panel tablewrap"><table><tr><th>日付</th>{% if user.role == 'admin' %}<th>名前</th>{% endif %}<th>車両</th><th>重要度</th><th>内容</th><th>状態</th><th>履歴</th></tr>
+{% for i in issues %}<tr><td>{{ i.issue_date }}</td>{% if user.role == 'admin' %}<td>{{ i.name }}</td>{% endif %}<td>{{ i.vehicle_name }}</td><td>{{ i.severity }}</td><td>{{ i.detail }}</td><td>
+  <span class="status-pill status-{{ i.status_class }}">{{ i.status }}</span>
+  {% if user.role == 'admin' %}
+  <form method="post" action="/vehicle-issues/{{ i.id }}/status" class="mini-form">
+    <select name="status">{% for s in statuses %}<option {% if s == i.status %}selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+    <button>変更</button>
+  </form>
+  {% endif %}
+</td><td>
+  {% for h in history_by_issue.get(i.id, []) %}
+  <div class="history-line">{{ h.changed_at }} {{ h.status }}（{{ h.changed_by_name }}）</div>
+  {% else %}
+  <span class="hint">履歴なし</span>
+  {% endfor %}
+</td></tr>{% endfor %}
+</table></section>
+{% endblock %}
