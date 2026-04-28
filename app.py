@@ -400,10 +400,18 @@ def require_admin(user=Depends(require_user)):
 
 
 def render(request: Request, name: str, context: dict):
-    user = current_user(request)
-    context.update({"request": request, "user": user, "today": date.today().isoformat()})
-    return templates.TemplateResponse(name, context)
+    try:
+        user = current_user(request)
+    except:
+        user = None
 
+    context.update({
+        "request": request,
+        "user": user,
+        "today": date.today().isoformat()
+    })
+
+    return templates.TemplateResponse(name, context)
 
 def month_bounds(ym: Optional[str]):
     if not ym:
