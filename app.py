@@ -411,7 +411,7 @@ def render(request: Request, name: str, context: dict):
         "today": date.today().isoformat()
     })
 
-    return templates.TemplateResponse(name, context)
+   return templates.TemplateResponse(request, name, context)
 
 def month_bounds(ym: Optional[str]):
     if not ym:
