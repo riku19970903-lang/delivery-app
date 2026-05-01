@@ -6,7 +6,7 @@ import re
 import sqlite3
 from typing import Optional
 from urllib.parse import quote
-
+# supabase connected
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
