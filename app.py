@@ -4,6 +4,7 @@ from hashlib import sha256
 from pathlib import Path
 import re
 import sqlite3
+import os
 import psycopg2
 import psycopg2.extras
 from typing import Optional
@@ -32,20 +33,9 @@ serializer = URLSafeSerializer(SECRET_KEY, salt="delivery-ops-session")
 
 
 def db():
-    database_url = os.environ.get("DATABASE_URL")
-
-    if database_url:
-        conn = psycopg2.connect(
-            database_url,
-            cursor_factory=psycopg2.extras.RealDictCursor
-        )
-        conn.autocommit = False
-        return conn
-
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def hash_password(password: str) -> str:
     return sha256(password.encode("utf-8")).hexdigest()
