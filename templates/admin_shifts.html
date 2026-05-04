@@ -1,13 +1,99 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>管理者ダッシュボード</h1>
-<div class="grid stats">
-  <div class="tile"><span>登録メンバー</span><strong>{{ members|length }}名</strong></div>
-  <div class="tile"><span>本日の点呼記録</span><strong>{{ logs|length }}件</strong></div>
-  <div class="tile"><span>本日の配達入力</span><strong>{{ deliveries|length }}件</strong></div>
-</div>
+<h1>シフト作成カレンダー</h1>
+<form class="toolbar">
+  <label>月<input type="month" name="ym" value="{{ ym }}"></label>
+  <button>表示</button>
+</form>
+
+<section class="panel">
+  <h2>日付をクリックして登録</h2>
+  <div class="shift-calendar admin-calendar">
+    {% for day in days %}
+    {% set day_key = day.isoformat() %}
+    <button type="button" class="shift-day {% if day_key == today %}today-cell{% endif %}" data-date="{{ day_key }}">
+      {% if day_key == today %}<span class="today-label">今日</span>{% endif %}
+      <span class="daynum">{{ day.day }}</span>
+      <span class="weekday">{{ day.strftime("%a") }}</span>
+      <span class="shift-lines">
+        {% for s in shifts_by_date.get(day_key, []) %}
+        <span class="shift-line" title="{{ s.area_text }}"><b>{{ s.name }}</b>: {{ s.status }}{% if s.status != "休み" and s.area_short_text %} / {{ s.area_short_text }}{% endif %}</span>
+        {% endfor %}
+      </span>
+    </button>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="panel shift-form" id="shift-form">
+  <h2>シフト登録</h2>
+  <form method="post" action="/shifts" class="formgrid">
+    <label>日付<input id="shift-date" type="date" name="shift_date" required></label>
+    <label>メンバー名
+      <select name="member_id" required>
+        {% for m in members %}<option value="{{ m.id }}">{{ m.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>出勤区分
+      <select id="shift-status" name="status" required>
+        <option>出勤</option>
+        <option>1便</option>
+        <option>2便</option>
+        <option>3便</option>
+        <option>休み</option>
+      </select>
+    </label>
+    <div class="area-picker" id="area-picker">
+      <p class="field-title">町会・配達エリア（複数選択可）</p>
+      <div class="checkgrid">
+        {% for t in towns %}
+        <label class="checkitem"><input type="checkbox" name="town_ids" value="{{ t.id }}"> {{ t.district_name }} / {{ t.name }}</label>
+        {% endfor %}
+      </div>
+    </div>
+    <button class="primary">決定して保存</button>
+  </form>
+</section>
+
 <div class="grid two">
-  <section class="panel"><h2>本日の配達個数</h2>{% include "parts_delivery_table.html" %}</section>
-  <section class="panel"><h2>車両不具合 最新</h2>{% for i in issues %}<p class="rowline"><b>{{ i.name }}</b> {{ i.issue_date }} {{ i.severity }}<br>{{ i.detail }}</p>{% else %}<p>未登録です。</p>{% endfor %}</section>
+  <section class="panel tablewrap">
+    <h2>シフト一覧</h2>
+    <table>
+      <tr><th>日付</th><th>名前</th><th>区分</th><th>町会・配達エリア</th></tr>
+      {% for s in shifts %}
+      <tr><td>{{ s.shift_date }}</td><td>{{ s.name }}</td><td>{{ s.status }}</td><td>{% if s.status != "休み" %}<b>{{ s.area_short_text }}</b><br><span class="hint">{{ s.area_text }}</span>{% endif %}</td></tr>
+      {% else %}
+      <tr><td colspan="4">まだシフトがありません。</td></tr>
+      {% endfor %}
+    </table>
+  </section>
+  <section class="panel tablewrap">
+    <h2>休み希望</h2>
+    <table>
+      <tr><th>日付</th><th>名前</th><th>理由</th></tr>
+      {% for h in holidays %}<tr><td>{{ h.request_date }}</td><td>{{ h.name }}</td><td>{{ h.reason }}</td></tr>{% endfor %}
+    </table>
+  </section>
 </div>
+
+<script>
+  const statusSelect = document.getElementById("shift-status");
+  const areaPicker = document.getElementById("area-picker");
+  function updateAreaVisibility() {
+    const isRest = statusSelect.value === "休み";
+    areaPicker.style.display = isRest ? "none" : "block";
+    areaPicker.querySelectorAll("input[type='checkbox']").forEach((input) => {
+      input.disabled = isRest;
+      if (isRest) input.checked = false;
+    });
+  }
+  statusSelect.addEventListener("change", updateAreaVisibility);
+  updateAreaVisibility();
+  document.querySelectorAll(".shift-day").forEach((button) => {
+    button.addEventListener("click", () => {
+      document.getElementById("shift-date").value = button.dataset.date;
+      document.getElementById("shift-form").scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+</script>
 {% endblock %}

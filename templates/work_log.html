@@ -1,10 +1,21 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>出退勤・点呼・安全確認</h1>
-<form method="post" class="panel formgrid">
-  <label>日付<input type="date" name="work_date" value="{{ today }}" required></label>
-  <label>出勤/退勤<select name="log_type"><option value="start">出勤</option><option value="end">退勤</option></select></label>
-  <label>日時<input type="datetime-local" name="logged_at" required></label>
+<h1>{{ "出勤記録" if log_type == "start" else "退勤記録" }}</h1>
+
+<div class="punch-switch">
+  <a class="button punch-start {% if log_type == 'start' %}active{% endif %}" href="/work-log?type=start">出勤</a>
+  <a class="button punch-end {% if log_type == 'end' %}active{% endif %}" href="/work-log?type=end">退勤</a>
+</div>
+
+<form method="post" class="panel formgrid punch-form">
+  <label>日付<input type="date" name="work_date" value="{{ work_date }}" required></label>
+  <label>出勤/退勤
+    <select name="log_type">
+      <option value="start" {% if log_type == "start" %}selected{% endif %}>出勤</option>
+      <option value="end" {% if log_type == "end" %}selected{% endif %}>退勤</option>
+    </select>
+  </label>
+  <label>日時<input type="datetime-local" name="logged_at" value="{{ logged_at }}" required></label>
   <label>アルコールチェック結果<input name="alcohol_result" placeholder="例: 0.00mg/L" required></label>
   <label>検知器使用<select name="detector_used"><option>有</option><option>無</option></select></label>
   <label>酒気帯び<select name="intoxicated"><option>無</option><option>有</option></select></label>
@@ -14,9 +25,16 @@
   <label>声の調子<select name="voice_check"><option>問題なし</option><option>要確認</option></select></label>
   <label>管理者確認欄<input name="admin_confirm" placeholder="確認者名など"></label>
   <label>備考<textarea name="notes"></textarea></label>
-  <button class="primary">記録する</button>
+  <button class="{{ 'punch-start' if log_type == 'start' else 'punch-end' }}">記録する</button>
 </form>
-<section class="panel tablewrap"><h2>自分の記録</h2><table><tr><th>日時</th><th>区分</th><th>検知器</th><th>酒気</th><th>体調</th><th>備考</th></tr>
-{% for l in logs %}<tr><td>{{ l.logged_at }}</td><td>{{ "出勤" if l.log_type == "start" else "退勤" }}</td><td>{{ l.detector_used }}</td><td>{{ l.intoxicated }}</td><td>{{ l.health_status }}</td><td>{{ l.notes }}</td></tr>{% endfor %}
-</table></section>
+
+<section class="panel tablewrap">
+  <h2>自分の記録</h2>
+  <table>
+    <tr><th>日時</th><th>区分</th><th>検知器</th><th>酒気</th><th>体調</th><th>備考</th></tr>
+    {% for l in logs %}
+    <tr><td>{{ l.logged_at }}</td><td>{{ "出勤" if l.log_type == "start" else "退勤" }}</td><td>{{ l.detector_used }}</td><td>{{ l.intoxicated }}</td><td>{{ l.health_status }}</td><td>{{ l.notes }}</td></tr>
+    {% endfor %}
+  </table>
+</section>
 {% endblock %}

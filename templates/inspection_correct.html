@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>点検表から配達個数を反映</h1>
+
+<section class="panel inspection-correct">
+  <div>
+    <p class="field-title">{{ sheet.sheet_date }} / {{ sheet.member_name }}</p>
+    <a href="{{ sheet.file_path }}" target="_blank">
+      <img class="inspection-photo" src="{{ sheet.file_path }}" alt="点検表画像">
+    </a>
+    <p class="hint">状態: {{ sheet.ocr_status }}。画像を見ながら、読み取れた個数を確認・補正してください。</p>
+  </div>
+
+  <form method="post" class="formgrid count-form">
+    <label>完了<input type="number" name="completed" value="{{ counts.completed }}" min="0" inputmode="numeric"></label>
+    <label>転送<input type="number" name="transfer" value="{{ counts.transfer }}" min="0" inputmode="numeric"></label>
+    <label>夜間<input type="number" name="night" value="{{ counts.night }}" min="0" inputmode="numeric"></label>
+    <label>集荷<input type="number" name="pickup" value="{{ counts.pickup }}" min="0" inputmode="numeric"></label>
+    <label>大型<input type="number" name="large" value="{{ counts.large }}" min="0" inputmode="numeric"></label>
+    <button class="primary">この内容で配達データに反映</button>
+  </form>
+</section>
+
+<div class="actions">
+  <a class="button" href="/inspection-sheets?day={{ sheet.sheet_date }}">点検表一覧へ戻る</a>
+  <a class="button" href="/deliveries?day={{ sheet.sheet_date }}">配達入力で確認</a>
+</div>
+{% endblock %}

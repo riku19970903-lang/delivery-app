@@ -1,10 +1,66 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>{{ user.name }}さんのホーム</h1>
-<div class="grid stats">
+<section class="home-hero">
+  <p class="eyebrow">今日も安全第一でいきましょう</p>
+  <h1>{{ user.name }}さんのホーム</h1>
+  <div class="reward-main">
+    <span>今月の見込み報酬</span>
+    <strong>{{ "{:,}".format(month_summary.net_total) }}円</strong>
+    {% if month_summary.vehicle_deduction > 0 %}
+    <small>車両代差し引き前 {{ "{:,}".format(month_summary.gross_total) }}円 / 差引 {{ "{:,}".format(month_summary.vehicle_deduction) }}円</small>
+    {% endif %}
+  </div>
+</section>
+
+<div class="grid stats home-stats">
   <div class="tile"><span>本日の報酬見込み</span><strong>{{ "{:,}".format(reward) }}円</strong></div>
-  <div class="tile"><span>本日のシフト</span><strong>{{ shift.status if shift else "未決定" }}</strong></div>
+  <div class="tile"><span>今月の配達完了数</span><strong>{{ "{:,}".format(month_summary.completed_total) }}個</strong></div>
+  <div class="tile"><span>本日のシフト</span><strong>{{ today_shift.status if today_shift else "未定" }}</strong></div>
 </div>
+
+<section class="panel app-card">
+  <h2>出勤・退勤</h2>
+  <div class="punch-actions">
+    <a class="button punch-start" href="/work-log?type=start">出勤する</a>
+    <a class="button punch-end" href="/work-log?type=end">退勤する</a>
+  </div>
+</section>
+
+<section class="panel app-card">
+  <h2>シフト予定</h2>
+  {% if today_shift %}
+  <div class="shift-card today">
+    <span>本日</span>
+    <b>{{ today_shift.shift_date }} / {{ today_shift.status }}</b>
+    {% if today_shift.status != "休み" %}
+    <small>{{ today_shift.area_short_text or today_shift.area_text or "配達エリア未設定" }}</small>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="shift-card empty"><b>本日のシフト未定</b></div>
+  {% endif %}
+
+  <div class="mini-shift-list">
+    {% for s in next_shifts %}
+    <div class="shift-card">
+      <span>次のシフト{% if loop.index == 2 %}の次{% endif %}</span>
+      <b>{{ s.shift_date }} / {{ s.status }}</b>
+      {% if s.status != "休み" %}
+      <small>{{ s.area_short_text or s.area_text or "配達エリア未設定" }}</small>
+      {% endif %}
+    </div>
+    {% else %}
+    <p class="hint">次のシフトはまだ決まっていません。</p>
+    {% endfor %}
+  </div>
+</section>
+
 <section class="comment">{{ comment }}</section>
-<div class="actions"><a class="button primary" href="/work-log">出勤・退勤を入力</a><a class="button primary" href="/deliveries">配達個数を入力</a><a class="button" href="/rewards">月間報酬を見る</a></div>
+
+<div class="actions home-actions">
+  <a class="button primary" href="/inspection-sheets">点検表を撮影する</a>
+  <a class="button primary" href="/deliveries">配達個数を入力</a>
+  <a class="button" href="/rewards">月間報酬を見る</a>
+  <a class="button" href="/member/shifts">シフトを見る</a>
+</div>
 {% endblock %}

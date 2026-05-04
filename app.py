@@ -1,15 +1,15 @@
 import calendar
-from datetime import date, datetime, timedelta
+from contextlib import contextmanager
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
+import os
 from pathlib import Path
 import re
 import sqlite3
-import os
-import psycopg2
-import psycopg2.extras
 from typing import Optional
 from urllib.parse import quote
-# supabase connected
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -19,6 +19,12 @@ from itsdangerous import BadSignature, URLSafeSerializer
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "delivery_ops.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
+USE_POSTGRES = bool(DATABASE_URL)
+try:
+    APP_TZ = ZoneInfo(os.getenv("APP_TIMEZONE", "Asia/Tokyo"))
+except ZoneInfoNotFoundError:
+    APP_TZ = timezone(timedelta(hours=9))
 UPLOAD_DIR = BASE_DIR / "uploads" / "inspection_sheets"
 SLIP_UPLOAD_DIR = BASE_DIR / "uploads" / "inspection_slips"
 SECRET_KEY = "change-this-local-secret"
@@ -32,10 +38,148 @@ templates = Jinja2Templates(directory=BASE_DIR / "templates")
 serializer = URLSafeSerializer(SECRET_KEY, salt="delivery-ops-session")
 
 
+def app_now():
+    return datetime.now(APP_TZ)
+
+
+def app_today():
+    return app_now().date()
+
+
+if USE_POSTGRES:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+
+    DB_INTEGRITY_ERROR = psycopg2.IntegrityError
+else:
+    psycopg2 = None
+    RealDictCursor = None
+    DB_INTEGRITY_ERROR = sqlite3.IntegrityError
+
+
+IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class DbCursor:
+    def __init__(self, cursor, lastrowid=None):
+        self.cursor = cursor
+        self.lastrowid = lastrowid if lastrowid is not None else getattr(cursor, "lastrowid", None)
+
+    def fetchone(self):
+        return self.cursor.fetchone()
+
+    def fetchall(self):
+        return self.cursor.fetchall()
+
+
+class DbConnection:
+    def __init__(self, conn, use_postgres: bool):
+        self.conn = conn
+        self.use_postgres = use_postgres
+
+    def execute(self, sql: str, params=()):
+        if not self.use_postgres:
+            return self.conn.execute(sql, params or ())
+
+        return_id = _needs_returning_id(sql)
+        translated_sql = _postgres_sql(sql, return_id=return_id)
+        cur = self.conn.cursor()
+        cur.execute(translated_sql, params or ())
+        lastrowid = None
+        if return_id:
+            row = cur.fetchone()
+            if row:
+                lastrowid = row["id"]
+        return DbCursor(cur, lastrowid)
+
+    def executescript(self, sql: str):
+        if not self.use_postgres:
+            return self.conn.executescript(sql)
+        return self.execute(sql)
+
+    def commit(self):
+        self.conn.commit()
+
+    def rollback(self):
+        self.conn.rollback()
+
+    def close(self):
+        self.conn.close()
+
+
+def _postgres_sql(sql: str, return_id: bool = False) -> str:
+    translated = re.sub(
+        r"INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT",
+        "SERIAL PRIMARY KEY",
+        sql,
+        flags=re.IGNORECASE,
+    )
+    translated = re.sub(r"\bAUTOINCREMENT\b", "", translated, flags=re.IGNORECASE)
+
+    if re.match(r"^\s*INSERT\s+OR\s+IGNORE\s+INTO\b", translated, flags=re.IGNORECASE):
+        translated = re.sub(
+            r"^\s*INSERT\s+OR\s+IGNORE\s+INTO\b",
+            "INSERT INTO",
+            translated,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        if "ON CONFLICT" not in translated.upper():
+            translated = _append_sql_clause(translated, "ON CONFLICT DO NOTHING")
+
+    translated = translated.replace("?", "%s")
+    if return_id:
+        translated = _append_sql_clause(translated, "RETURNING id")
+    return translated
+
+
+def _append_sql_clause(sql: str, clause: str) -> str:
+    stripped = sql.rstrip()
+    has_semicolon = stripped.endswith(";")
+    if has_semicolon:
+        stripped = stripped[:-1].rstrip()
+    stripped = f"{stripped} {clause}"
+    return f"{stripped};" if has_semicolon else stripped
+
+
+def _needs_returning_id(sql: str) -> bool:
+    return bool(
+        re.match(r"^\s*INSERT\s+INTO\s+(users|vehicle_issues)\b", sql, flags=re.IGNORECASE)
+        and "RETURNING" not in sql.upper()
+        and "ON CONFLICT" not in sql.upper()
+    )
+
+
+def _quote_identifier(name: str) -> str:
+    if not IDENTIFIER_RE.match(name):
+        raise ValueError(f"Unsafe SQL identifier: {name}")
+    return f'"{name}"' if USE_POSTGRES else name
+
+
+@contextmanager
 def db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    if USE_POSTGRES:
+        connect_kwargs = {
+            "cursor_factory": RealDictCursor,
+            "connect_timeout": 10,
+        }
+        if "sslmode=" not in DATABASE_URL.lower():
+            connect_kwargs["sslmode"] = "require"
+        conn = psycopg2.connect(DATABASE_URL, **connect_kwargs)
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+
+    wrapped = DbConnection(conn, USE_POSTGRES)
+    try:
+        yield wrapped
+        wrapped.commit()
+    except Exception:
+        wrapped.rollback()
+        raise
+    finally:
+        wrapped.close()
+
 
 def hash_password(password: str) -> str:
     return sha256(password.encode("utf-8")).hexdigest()
@@ -66,6 +210,18 @@ def query_all(sql: str, params=()):
 
 
 def ensure_column(conn, table: str, column: str, definition: str):
+    if USE_POSTGRES:
+        exists = conn.execute(
+            """SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public' AND table_name = ? AND column_name = ?""",
+            (table, column),
+        ).fetchone()
+        if not exists:
+            conn.execute(
+                f"ALTER TABLE {_quote_identifier(table)} ADD COLUMN {_quote_identifier(column)} {definition}"
+            )
+        return
+
     columns = [row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
@@ -218,6 +374,7 @@ def init_db():
                 large INTEGER NOT NULL DEFAULT 0,
                 vehicle_rental TEXT NOT NULL DEFAULT 'none',
                 memo TEXT DEFAULT '',
+                inspection_sheet_path TEXT DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(user_id, work_date),
@@ -334,6 +491,7 @@ def init_db():
         ensure_column(conn, "shifts", "district_id", "INTEGER")
         ensure_column(conn, "shifts", "town_id", "INTEGER")
         ensure_column(conn, "shifts", "area_label", "TEXT DEFAULT ''")
+        ensure_column(conn, "deliveries", "inspection_sheet_path", "TEXT DEFAULT ''")
         ensure_column(conn, "vehicle_issues", "status", "TEXT NOT NULL DEFAULT '未対応'")
         ensure_column(conn, "users", "purged", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "users", "deleted_at", "TEXT DEFAULT ''")
@@ -402,21 +560,14 @@ def require_admin(user=Depends(require_user)):
 
 
 def render(request: Request, name: str, context: dict):
-    try:
-        user = current_user(request)
-    except:
-        user = None
+    user = current_user(request)
+    context.update({"request": request, "user": user, "today": app_today().isoformat()})
+    return templates.TemplateResponse(name, context)
 
-    context.update({
-        "request": request,
-        "user": user,
-        "today": date.today().isoformat()
-    })
 
-    return templates.TemplateResponse(request, name, context)
 def month_bounds(ym: Optional[str]):
     if not ym:
-        base = date.today().replace(day=1)
+        base = app_today().replace(day=1)
     else:
         base = datetime.strptime(ym, "%Y-%m").date().replace(day=1)
     if base.month == 12:
@@ -516,6 +667,99 @@ def calc_reward(row, rates, vehicle_rates=None, monthly_mode=False):
     return reward
 
 
+def calc_reward_gross(row, rates):
+    if not row or not rates:
+        return 0
+    return (
+        row["completed"] * rates["delivery_unit"]
+        + row["transfer"] * rates["transfer_unit"]
+        + row["night"] * rates["night_unit"]
+        + row["pickup"] * rates["pickup_unit"]
+        + row["large"] * rates["large_unit"]
+    )
+
+
+def monthly_reward_summary(user_id: int, target_month: date):
+    start = target_month.replace(day=1)
+    if start.month == 12:
+        next_month = start.replace(year=start.year + 1, month=1)
+    else:
+        next_month = start.replace(month=start.month + 1)
+    end = next_month - timedelta(days=1)
+    rows = query_all(
+        "SELECT * FROM deliveries WHERE user_id=? AND work_date BETWEEN ? AND ? ORDER BY work_date",
+        (user_id, start.isoformat(), end.isoformat()),
+    )
+    rates = query_one("SELECT * FROM rates WHERE user_id=?", (user_id,))
+    vehicle_rates = query_one("SELECT * FROM vehicle_rates WHERE id=1")
+    gross_total = sum(calc_reward_gross(row, rates) for row in rows)
+    net_total = 0
+    completed_total = sum(row["completed"] for row in rows)
+    monthly_deducted = False
+    rental_type = rates["vehicle_rental_type"] if rates and "vehicle_rental_type" in rates.keys() else "none"
+    for row in rows:
+        monthly_mode = rental_type == "monthly" and not monthly_deducted
+        net_total += calc_reward(row, rates, vehicle_rates, monthly_mode=monthly_mode)
+        monthly_deducted = monthly_deducted or monthly_mode
+    return {
+        "gross_total": gross_total,
+        "net_total": net_total,
+        "vehicle_deduction": gross_total - net_total,
+        "completed_total": completed_total,
+        "rows": rows,
+    }
+
+
+def upcoming_member_shifts(user_id: int, today_s: str):
+    rows = query_all(
+        """SELECT s.*, d.name AS district_name, t.name AS town_name
+           FROM shifts s
+           LEFT JOIN districts d ON d.id=s.district_id
+           LEFT JOIN towns t ON t.id=s.town_id
+           WHERE s.user_id=? AND s.shift_date>=? AND s.decided=1
+           ORDER BY s.shift_date LIMIT 3""",
+        (user_id, today_s),
+    )
+    return attach_shift_areas(rows)
+
+
+def extract_delivery_counts(ocr_text: str = ""):
+    labels = {
+        "completed": ["完了", "配達完了", "配完"],
+        "transfer": ["転送"],
+        "night": ["夜間"],
+        "pickup": ["集荷"],
+        "large": ["大型"],
+    }
+    counts = {key: 0 for key in labels}
+    normalized = (ocr_text or "").replace(",", "")
+    for key, names in labels.items():
+        for name in names:
+            patterns = [
+                rf"{name}[^\d]{{0,12}}(\d+)",
+                rf"(\d+)[^\d]{{0,12}}{name}",
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, normalized)
+                if match:
+                    counts[key] = int(match.group(1))
+                    break
+            if counts[key]:
+                break
+    return counts
+
+
+def extract_ocr_text(image_path: Path):
+    try:
+        from PIL import Image
+        import pytesseract
+
+        with Image.open(image_path) as image:
+            return pytesseract.image_to_string(image, lang=os.getenv("OCR_LANG", "jpn+eng")).strip()
+    except Exception:
+        return ""
+
+
 def auto_comment(delivery, reward, has_shift=True):
     if not delivery:
         return "今日の入力をすると、ここに応援コメントが表示されます。"
@@ -563,7 +807,7 @@ def logout():
 @app.get("/admin", response_class=HTMLResponse)
 def admin_dashboard(request: Request, user=Depends(require_admin)):
     members = query_all("SELECT * FROM users WHERE role = 'member' AND active = 1 ORDER BY id")
-    today_s = date.today().isoformat()
+    today_s = app_today().isoformat()
     logs = query_all(
         """SELECT w.*, u.name FROM work_logs w JOIN users u ON u.id = w.user_id
            WHERE w.work_date = ? ORDER BY w.logged_at DESC""",
@@ -598,7 +842,7 @@ def save_member(
     vehicle: str = Form(""),
     user=Depends(require_admin),
 ):
-    now = datetime.now().isoformat(timespec="seconds")
+    now = app_now().isoformat(timespec="seconds")
     if member_id:
         duplicate = query_one("SELECT id FROM users WHERE username=? AND id<>?", (username, member_id))
         if duplicate:
@@ -630,7 +874,7 @@ def save_member(
             (name, username, hash_password(password or "member123"), "member", phone, vehicle, now),
         )
         execute("INSERT OR IGNORE INTO rates(user_id) VALUES (?)", (cur.lastrowid,))
-    except sqlite3.IntegrityError:
+    except DB_INTEGRITY_ERROR:
         return RedirectResponse(f"/admin/members?error={quote('ログインIDが重複しています。別のIDを入力してください')}", status_code=303)
     return RedirectResponse("/admin/members?message=" + quote("メンバーを追加しました"), status_code=303)
 
@@ -648,7 +892,8 @@ def purge_retired_member(member_id: int, user=Depends(require_admin)):
         return RedirectResponse(f"/admin/members?error={quote('メンバーが見つかりません')}", status_code=303)
     if member["active"] == 1:
         return RedirectResponse(f"/admin/members?error={quote('在籍中メンバーは完全削除できません。先に退職扱いにしてください')}", status_code=303)
-    now = datetime.now().isoformat(timespec="seconds")
+    now_dt = app_now()
+    now = now_dt.isoformat(timespec="seconds")
     anonymized_username = f"deleted_member_{member_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     execute(
         """UPDATE users
@@ -712,20 +957,47 @@ def save_vehicle_rates(daily_fee: int = Form(...), monthly_fee: int = Form(...),
 def member_home(request: Request, user=Depends(require_user)):
     if user["role"] == "admin":
         return RedirectResponse("/admin", status_code=303)
-    today_s = date.today().isoformat()
+    today_s = app_today().isoformat()
     delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND work_date=?", (user["id"], today_s))
     rates = query_one("SELECT * FROM rates WHERE user_id=?", (user["id"],))
     vehicle_rates = query_one("SELECT * FROM vehicle_rates WHERE id=1")
     shift = query_one("SELECT * FROM shifts WHERE user_id=? AND shift_date=? AND decided=1", (user["id"], today_s))
     reward = calc_reward(delivery, rates, vehicle_rates) if delivery else 0
     comment = auto_comment(delivery, reward, bool(shift))
-    return render(request, "member_home.html", {"delivery": delivery, "reward": reward, "comment": comment, "shift": shift})
+    month_summary = monthly_reward_summary(user["id"], app_today())
+    shifts = upcoming_member_shifts(user["id"], today_s)
+    today_shift = shifts[0] if shifts and shifts[0]["shift_date"] == today_s else None
+    next_shifts = [item for item in shifts if item["shift_date"] != today_s][:2]
+    return render(
+        request,
+        "member_home.html",
+        {
+            "delivery": delivery,
+            "reward": reward,
+            "comment": comment,
+            "shift": shift,
+            "month_summary": month_summary,
+            "today_shift": today_shift,
+            "next_shifts": next_shifts,
+        },
+    )
 
 
 @app.get("/work-log", response_class=HTMLResponse)
-def work_log_page(request: Request, user=Depends(require_user)):
+def work_log_page(request: Request, type: str = "start", user=Depends(require_user)):
+    log_type = type if type in {"start", "end"} else "start"
+    now = app_now()
     logs = query_all("SELECT * FROM work_logs WHERE user_id=? ORDER BY logged_at DESC LIMIT 20", (user["id"],))
-    return render(request, "work_log.html", {"logs": logs})
+    return render(
+        request,
+        "work_log.html",
+        {
+            "logs": logs,
+            "log_type": log_type,
+            "work_date": now.date().isoformat(),
+            "logged_at": now.strftime("%Y-%m-%dT%H:%M"),
+        },
+    )
 
 
 @app.post("/work-log")
@@ -748,17 +1020,17 @@ def save_work_log(
         """INSERT INTO work_logs(user_id, work_date, log_type, logged_at, alcohol_result, detector_used,
            intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (user["id"], work_date, log_type, logged_at, alcohol_result, detector_used, intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, datetime.now().isoformat(timespec="seconds")),
+        (user["id"], work_date, log_type, logged_at, alcohol_result, detector_used, intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, app_now().isoformat(timespec="seconds")),
     )
     return RedirectResponse("/work-log", status_code=303)
 
 
 @app.get("/deliveries", response_class=HTMLResponse)
 def delivery_page(request: Request, day: Optional[str] = None, user=Depends(require_user)):
-    target = day or date.today().isoformat()
+    target = day or app_today().isoformat()
     if user["role"] == "admin":
         rows = query_all(
-            """SELECT d.*, u.name, s.file_path AS slip_path
+            """SELECT d.*, u.name, COALESCE(s.file_path, d.inspection_sheet_path) AS slip_path
                FROM deliveries d
                JOIN users u ON u.id=d.user_id
                LEFT JOIN inspection_slips s ON s.delivery_id=d.id
@@ -768,10 +1040,30 @@ def delivery_page(request: Request, day: Optional[str] = None, user=Depends(requ
         return render(request, "admin_deliveries.html", {"rows": rows, "target": target})
     delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND work_date=?", (user["id"], target))
     slip = query_one("SELECT * FROM inspection_slips WHERE user_id=? AND slip_date=?", (user["id"], target))
+    sheet = query_one("SELECT * FROM inspection_sheets WHERE user_id=? AND sheet_date=?", (user["id"], target))
     rates = query_one("SELECT * FROM rates WHERE user_id=?", (user["id"],))
     vehicle_rates = query_one("SELECT * FROM vehicle_rates WHERE id=1")
     reward = calc_reward(delivery, rates, vehicle_rates) if delivery else 0
-    return render(request, "deliveries.html", {"delivery": delivery, "slip": slip, "target": target, "reward": reward, "comment": auto_comment(delivery, reward)})
+    inspection_image_path = ""
+    if slip:
+        inspection_image_path = slip["file_path"]
+    elif delivery and "inspection_sheet_path" in delivery.keys() and delivery["inspection_sheet_path"]:
+        inspection_image_path = delivery["inspection_sheet_path"]
+    elif sheet:
+        inspection_image_path = sheet["file_path"]
+    return render(
+        request,
+        "deliveries.html",
+        {
+            "delivery": delivery,
+            "slip": slip,
+            "sheet": sheet,
+            "inspection_image_path": inspection_image_path,
+            "target": target,
+            "reward": reward,
+            "comment": auto_comment(delivery, reward),
+        },
+    )
 
 
 @app.post("/deliveries")
@@ -789,15 +1081,16 @@ async def save_delivery(
 ):
     if user["role"] == "admin":
         raise HTTPException(status_code=403, detail="メンバーとしてログインしてください")
-    now = datetime.now().isoformat(timespec="seconds")
+    now_dt = app_now()
+    now = now_dt.isoformat(timespec="seconds")
     with db() as conn:
         conn.execute(
-            """INSERT INTO deliveries(user_id, work_date, completed, transfer, night, pickup, large, vehicle_rental, memo, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """INSERT INTO deliveries(user_id, work_date, completed, transfer, night, pickup, large, vehicle_rental, memo, inspection_sheet_path, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(user_id, work_date) DO UPDATE SET completed=excluded.completed, transfer=excluded.transfer,
                night=excluded.night, pickup=excluded.pickup, large=excluded.large, vehicle_rental=excluded.vehicle_rental,
                memo=excluded.memo, updated_at=excluded.updated_at""",
-            (user["id"], work_date, completed, transfer, night, pickup, large, vehicle_rental, memo, now, now),
+            (user["id"], work_date, completed, transfer, night, pickup, large, vehicle_rental, memo, "", now, now),
         )
         delivery = conn.execute("SELECT id FROM deliveries WHERE user_id=? AND work_date=?", (user["id"], work_date)).fetchone()
         conn.commit()
@@ -813,7 +1106,7 @@ async def save_delivery(
             max_size = 15 * 1024 * 1024
             if len(data) > max_size:
                 data = data[:max_size]
-            filename = f"user{user['id']}_{work_date.replace('-', '')}_{datetime.now().strftime('%H%M%S%f')}{suffix}"
+            filename = f"user{user['id']}_{work_date.replace('-', '')}_{now_dt.strftime('%H%M%S%f')}{suffix}"
             disk_path = SLIP_UPLOAD_DIR / filename
             disk_path.write_bytes(data)
             public_path = f"/uploads/inspection_slips/{filename}"
@@ -827,6 +1120,7 @@ async def save_delivery(
                        content_type=excluded.content_type, uploaded_at=excluded.uploaded_at""",
                     (user["id"], delivery["id"], work_date, public_path, inspection_image.filename or "", inspection_image.content_type or "", now),
                 )
+                conn.execute("UPDATE deliveries SET inspection_sheet_path=?, updated_at=? WHERE id=?", (public_path, now, delivery["id"]))
                 conn.commit()
             if existing and existing["file_path"].startswith("/uploads/inspection_slips/"):
                 old_path = BASE_DIR / existing["file_path"].lstrip("/")
@@ -840,7 +1134,7 @@ async def save_delivery(
 
 @app.get("/inspection-sheets", response_class=HTMLResponse)
 def inspection_sheets_page(request: Request, day: Optional[str] = None, member_id: Optional[int] = None, user=Depends(require_user)):
-    target = day or date.today().isoformat()
+    target = day or app_today().isoformat()
     if user["role"] == "admin":
         members = query_all("SELECT id, name FROM users WHERE role='member' AND active=1 AND COALESCE(purged,0)=0 ORDER BY name")
         params = [target]
@@ -869,9 +1163,10 @@ async def upload_inspection_sheet(sheet_date: str = Form(...), image: UploadFile
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="画像ファイルを選択してください")
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    now = datetime.now().isoformat(timespec="seconds")
+    now_dt = app_now()
+    now = now_dt.isoformat(timespec="seconds")
     suffix = safe_upload_name(image.filename)
-    filename = f"user{user['id']}_{sheet_date.replace('-', '')}_{datetime.now().strftime('%H%M%S%f')}{suffix}"
+    filename = f"user{user['id']}_{sheet_date.replace('-', '')}_{now_dt.strftime('%H%M%S%f')}{suffix}"
     disk_path = UPLOAD_DIR / filename
     data = await image.read()
     if not data:
@@ -880,16 +1175,19 @@ async def upload_inspection_sheet(sheet_date: str = Form(...), image: UploadFile
         raise HTTPException(status_code=400, detail="画像サイズは10MB以内にしてください")
     disk_path.write_bytes(data)
     public_path = f"/uploads/inspection_sheets/{filename}"
+    ocr_text = extract_ocr_text(disk_path)
+    ocr_status = "OCR確認待ち" if ocr_text else "手入力待ち"
     existing = query_one("SELECT file_path FROM inspection_sheets WHERE user_id=? AND sheet_date=?", (user["id"], sheet_date))
     with db() as conn:
         conn.execute(
-            """INSERT INTO inspection_sheets(user_id, sheet_date, file_path, original_filename, content_type, ocr_status, created_at)
-               VALUES (?, ?, ?, ?, ?, '未処理', ?)
+            """INSERT INTO inspection_sheets(user_id, sheet_date, file_path, original_filename, content_type, ocr_status, ocr_text, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(user_id, sheet_date) DO UPDATE SET file_path=excluded.file_path,
                original_filename=excluded.original_filename, content_type=excluded.content_type,
-               ocr_status='未処理', ocr_text='', created_at=excluded.created_at""",
-            (user["id"], sheet_date, public_path, image.filename or "", image.content_type or "", now),
+               ocr_status=excluded.ocr_status, ocr_text=excluded.ocr_text, created_at=excluded.created_at""",
+            (user["id"], sheet_date, public_path, image.filename or "", image.content_type or "", ocr_status, ocr_text, now),
         )
+        sheet = conn.execute("SELECT id FROM inspection_sheets WHERE user_id=? AND sheet_date=?", (user["id"], sheet_date)).fetchone()
         conn.commit()
     if existing and existing["file_path"].startswith("/uploads/inspection_sheets/"):
         old_path = BASE_DIR / existing["file_path"].lstrip("/")
@@ -898,7 +1196,102 @@ async def upload_inspection_sheet(sheet_date: str = Form(...), image: UploadFile
                 old_path.unlink()
             except OSError:
                 pass
-    return RedirectResponse(f"/inspection-sheets?day={sheet_date}", status_code=303)
+    return RedirectResponse(f"/inspection-sheets/{sheet['id']}/correct", status_code=303)
+
+
+def inspection_sheet_for_user(sheet_id: int, user):
+    if user["role"] == "admin":
+        sheet = query_one(
+            """SELECT s.*, u.name AS member_name FROM inspection_sheets s
+               JOIN users u ON u.id=s.user_id
+               WHERE s.id=?""",
+            (sheet_id,),
+        )
+    else:
+        sheet = query_one(
+            """SELECT s.*, u.name AS member_name FROM inspection_sheets s
+               JOIN users u ON u.id=s.user_id
+               WHERE s.id=? AND s.user_id=?""",
+            (sheet_id, user["id"]),
+        )
+    if not sheet:
+        raise HTTPException(status_code=404, detail="点検表が見つかりません")
+    return sheet
+
+
+@app.get("/inspection-sheets/{sheet_id}/correct", response_class=HTMLResponse)
+def inspection_sheet_correct_page(request: Request, sheet_id: int, user=Depends(require_user)):
+    sheet = inspection_sheet_for_user(sheet_id, user)
+    delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND work_date=?", (sheet["user_id"], sheet["sheet_date"]))
+    extracted = extract_delivery_counts(sheet["ocr_text"] or "")
+    counts = {
+        "completed": delivery["completed"] if delivery else extracted["completed"],
+        "transfer": delivery["transfer"] if delivery else extracted["transfer"],
+        "night": delivery["night"] if delivery else extracted["night"],
+        "pickup": delivery["pickup"] if delivery else extracted["pickup"],
+        "large": delivery["large"] if delivery else extracted["large"],
+    }
+    return render(
+        request,
+        "inspection_correct.html",
+        {"sheet": sheet, "delivery": delivery, "counts": counts},
+    )
+
+
+@app.post("/inspection-sheets/{sheet_id}/correct")
+def apply_inspection_sheet_counts(
+    sheet_id: int,
+    completed: int = Form(0),
+    transfer: int = Form(0),
+    night: int = Form(0),
+    pickup: int = Form(0),
+    large: int = Form(0),
+    user=Depends(require_user),
+):
+    sheet = inspection_sheet_for_user(sheet_id, user)
+    now = app_now().isoformat(timespec="seconds")
+    existing = query_one("SELECT * FROM deliveries WHERE user_id=? AND work_date=?", (sheet["user_id"], sheet["sheet_date"]))
+    memo = existing["memo"] if existing and existing["memo"] else "点検表から反映"
+    vehicle_rental = existing["vehicle_rental"] if existing else "none"
+    values = {
+        "completed": max(completed, 0),
+        "transfer": max(transfer, 0),
+        "night": max(night, 0),
+        "pickup": max(pickup, 0),
+        "large": max(large, 0),
+    }
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO deliveries(user_id, work_date, completed, transfer, night, pickup, large, vehicle_rental, memo, inspection_sheet_path, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(user_id, work_date) DO UPDATE SET completed=excluded.completed,
+               transfer=excluded.transfer, night=excluded.night, pickup=excluded.pickup, large=excluded.large,
+               inspection_sheet_path=excluded.inspection_sheet_path, updated_at=excluded.updated_at""",
+            (
+                sheet["user_id"],
+                sheet["sheet_date"],
+                values["completed"],
+                values["transfer"],
+                values["night"],
+                values["pickup"],
+                values["large"],
+                vehicle_rental,
+                memo,
+                sheet["file_path"],
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "UPDATE inspection_sheets SET ocr_status=?, ocr_text=? WHERE id=?",
+            (
+                "反映済み",
+                f"完了={values['completed']}, 転送={values['transfer']}, 夜間={values['night']}, 集荷={values['pickup']}, 大型={values['large']}",
+                sheet_id,
+            ),
+        )
+        conn.commit()
+    return RedirectResponse(f"/deliveries?day={sheet['sheet_date']}", status_code=303)
 
 
 @app.get("/rewards", response_class=HTMLResponse)
@@ -1030,6 +1423,18 @@ def save_holiday(request_date: str = Form(...), reason: str = Form(""), user=Dep
         (user["id"], request_date, reason, datetime.now().isoformat(timespec="seconds")),
     )
     return RedirectResponse("/holidays", status_code=303)
+
+
+@app.get("/admin/shifts")
+def admin_shifts_link(user=Depends(require_admin)):
+    return RedirectResponse("/shifts", status_code=303)
+
+
+@app.get("/member/shifts")
+def member_shifts_link(user=Depends(require_user)):
+    if user["role"] == "admin":
+        return RedirectResponse("/shifts", status_code=303)
+    return RedirectResponse("/shifts", status_code=303)
 
 
 @app.get("/shifts", response_class=HTMLResponse)
@@ -1245,9 +1650,5 @@ def admin_safety_print(request: Request, ym: Optional[str] = None, member_id: Op
     return render(
         request,
         "safety_print.html",
-        
         {"records": records, "ym": start.strftime("%Y-%m"), "period": f"{start.isoformat()} ～ {end.isoformat()}", "member": member},
     )
-@app.get("/login")
-def login(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request})
