@@ -25,7 +25,7 @@
     <tr><th>日付</th><th>メンバー</th><th>画像</th><th>状態</th><th>配達反映</th><th>登録日時</th></tr>
     {% for s in sheets %}
     <tr>
-      <td>{{ s.sheet_date }}</td>
+      <td>{{ s.delivery_date or s.sheet_date }}</td>
       <td>{{ s.name }}</td>
       <td>{% if s.image_available %}<a class="button mini-button" href="{{ s.image_view_url }}" target="_blank">画像を見る</a><br><span class="success mini-badge">画像あり</span>{% elif s.image_missing %}<span class="alert mini-badge">{{ s.image_label }}</span>{% else %}<span class="hint mini-badge">画像未登録</span>{% endif %}</td>
       <td>{{ s.ocr_status }}</td>

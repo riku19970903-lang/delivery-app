@@ -613,11 +613,16 @@ def _init_db_schema():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 sheet_date TEXT NOT NULL,
+                delivery_date TEXT DEFAULT '',
                 file_path TEXT NOT NULL,
                 original_filename TEXT DEFAULT '',
                 content_type TEXT DEFAULT '',
                 ocr_status TEXT NOT NULL DEFAULT '未処理',
                 ocr_text TEXT DEFAULT '',
+                ocr_completed INTEGER NOT NULL DEFAULT 0,
+                ocr_pickup INTEGER NOT NULL DEFAULT 0,
+                ocr_acceptance INTEGER NOT NULL DEFAULT 0,
+                ocr_received INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id),
                 UNIQUE(user_id, sheet_date)
@@ -680,10 +685,15 @@ def _init_db_schema():
         ensure_column(conn, "shifts", "decided", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "shifts", "updated_at", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_sheets", "file_path", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_sheets", "delivery_date", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_sheets", "original_filename", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_sheets", "content_type", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_sheets", "ocr_status", "TEXT DEFAULT '未処理'")
         ensure_column(conn, "inspection_sheets", "ocr_text", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_sheets", "ocr_completed", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "inspection_sheets", "ocr_pickup", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "inspection_sheets", "ocr_acceptance", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "inspection_sheets", "ocr_received", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "inspection_sheets", "created_at", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_slips", "file_path", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_slips", "original_filename", "TEXT DEFAULT ''")
@@ -1336,38 +1346,109 @@ def upcoming_member_shifts(user_id: int, today_s: str):
 
 
 def extract_delivery_counts(ocr_text: str = ""):
-    labels = {
-        "completed": ["完了", "配達完了", "配完"],
-        "transfer": ["転送"],
-        "night": ["夜間"],
-        "pickup": ["集荷"],
-        "large": ["大型"],
+    fields = extract_inspection_fields(ocr_text)
+    counts = {
+        "completed": fields["completed"],
+        "transfer": _count_after_labels(ocr_text, ["転送"]),
+        "night": _count_after_labels(ocr_text, ["夜間"]),
+        "pickup": fields["pickup"],
+        "large": _count_after_labels(ocr_text, ["大型", "大口"]),
     }
-    counts = {key: 0 for key in labels}
-    normalized = (ocr_text or "").replace(",", "")
-    for key, names in labels.items():
-        for name in names:
-            patterns = [
-                rf"{name}[^\d]{{0,12}}(\d+)",
-                rf"(\d+)[^\d]{{0,12}}{name}",
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, normalized)
-                if match:
-                    counts[key] = int(match.group(1))
-                    break
-            if counts[key]:
-                break
     return counts
+
+
+def normalize_ocr_text(ocr_text: str = ""):
+    text = unicodedata.normalize("NFKC", ocr_text or "")
+    text = text.translate(FULLWIDTH_DIGITS)
+    replacements = {
+        "配達完了": "配達完了",
+        "配達完ア": "配達完了",
+        "配達完丁": "配達完了",
+        "引受け": "引受",
+        "引き受け": "引受",
+        "引 受": "引受",
+        "受 入": "受入",
+    }
+    for before, after in replacements.items():
+        text = text.replace(before, after)
+    return text.replace(",", "")
+
+
+def parse_inspection_date(ocr_text: str = "", fallback_date: str = ""):
+    text = normalize_ocr_text(ocr_text)
+    patterns = [
+        r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日",
+        r"(\d{4})[-/\.](\d{1,2})[-/\.](\d{1,2})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        year, month, day = [int(value) for value in match.groups()]
+        try:
+            return date(year, month, day).isoformat()
+        except ValueError:
+            pass
+    return normalize_import_date(fallback_date) if fallback_date else ""
+
+
+def _numbers_after_label(line: str, label: str):
+    match = re.search(rf"{re.escape(label)}[^\d]{{0,18}}(\d+)", line)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _count_after_labels(ocr_text: str = "", labels=None):
+    labels = labels or []
+    text = normalize_ocr_text(ocr_text)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for label in labels:
+        for line in lines:
+            value = _numbers_after_label(line, label)
+            if value is not None:
+                return value
+    compact = re.sub(r"\s+", "", text)
+    for label in labels:
+        value = _numbers_after_label(compact, label)
+        if value is not None:
+            return value
+    return 0
+
+
+def extract_inspection_fields(ocr_text: str = "", fallback_date: str = ""):
+    completed = _count_after_labels(ocr_text, ["配達完了", "配完", "完了"])
+    acceptance = _count_after_labels(ocr_text, ["引受", "集荷"])
+    received = _count_after_labels(ocr_text, ["受入"])
+    return {
+        "work_date": parse_inspection_date(ocr_text, fallback_date),
+        "completed": completed,
+        "pickup": acceptance,
+        "acceptance": acceptance,
+        "received": received,
+    }
 
 
 def extract_ocr_text(image_path: Path):
     try:
         from PIL import Image
+        from PIL import ImageEnhance, ImageFilter, ImageOps
         import pytesseract
 
+        lang = os.getenv("OCR_LANG", "jpn+eng")
+        config = os.getenv("OCR_CONFIG", "--psm 6")
         with Image.open(image_path) as image:
-            return pytesseract.image_to_string(image, lang=os.getenv("OCR_LANG", "jpn+eng")).strip()
+            image = ImageOps.exif_transpose(image)
+            image.thumbnail((1800, 2600))
+            variants = [image]
+            gray = ImageOps.grayscale(image)
+            gray = ImageOps.autocontrast(gray)
+            gray = ImageEnhance.Contrast(gray).enhance(1.8)
+            if max(gray.size) < 2200:
+                gray = gray.resize((gray.width * 2, gray.height * 2))
+            variants.append(gray.filter(ImageFilter.SHARPEN))
+            texts = [pytesseract.image_to_string(item, lang=lang, config=config).strip() for item in variants]
+            return max(texts, key=len).strip()
     except Exception:
         return ""
 
@@ -1758,7 +1839,7 @@ def inspection_sheets_page(request: Request, day: Optional[str] = None, member_i
     target = day or app_today().isoformat()
     if user["role"] == "admin":
         members = query_all("SELECT id, name FROM users WHERE role='member' AND active=1 AND COALESCE(purged,0)=0 ORDER BY name")
-        params = [target]
+        params = [target, target]
         member_filter = ""
         if member_id:
             member_filter = " AND u.id=?"
@@ -1766,7 +1847,7 @@ def inspection_sheets_page(request: Request, day: Optional[str] = None, member_i
         sheets = query_all(
             f"""SELECT s.*, u.name FROM inspection_sheets s
                 JOIN users u ON u.id=s.user_id
-                WHERE s.sheet_date=? {member_filter}
+                WHERE (s.sheet_date=? OR COALESCE(s.delivery_date, '')=?) {member_filter}
                 ORDER BY u.name LIMIT 200""",
             params,
         )
@@ -1774,7 +1855,7 @@ def inspection_sheets_page(request: Request, day: Optional[str] = None, member_i
         submitted_rows = query_all(
             f"""SELECT s.user_id FROM inspection_sheets s
                 JOIN users u ON u.id=s.user_id
-                WHERE s.sheet_date=? {member_filter}""",
+                WHERE (s.sheet_date=? OR COALESCE(s.delivery_date, '')=?) {member_filter}""",
             params,
         )
         submitted_ids = {sheet["user_id"] for sheet in submitted_rows}
@@ -1804,15 +1885,36 @@ async def upload_inspection_sheet(sheet_date: str = Form(...), image: UploadFile
     disk_path.write_bytes(data)
     public_path = upload_to_supabase_storage("inspection_sheets", filename, data, image.content_type or "") or f"/uploads/inspection_sheets/{filename}"
     ocr_text = extract_ocr_text(disk_path)
+    extracted = extract_inspection_fields(ocr_text, fallback_date=sheet_date)
+    delivery_date = extracted["work_date"] or sheet_date
     ocr_status = "OCR確認待ち" if ocr_text else "手入力待ち"
     with db() as conn:
         conn.execute(
-            """INSERT INTO inspection_sheets(user_id, sheet_date, file_path, original_filename, content_type, ocr_status, ocr_text, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO inspection_sheets(user_id, sheet_date, delivery_date, file_path, original_filename, content_type,
+               ocr_status, ocr_text, ocr_completed, ocr_pickup, ocr_acceptance, ocr_received, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(user_id, sheet_date) DO UPDATE SET file_path=excluded.file_path,
+               delivery_date=excluded.delivery_date,
                original_filename=excluded.original_filename, content_type=excluded.content_type,
-               ocr_status=excluded.ocr_status, ocr_text=excluded.ocr_text, created_at=excluded.created_at""",
-            (user["id"], sheet_date, public_path, image.filename or "", image.content_type or "", ocr_status, ocr_text, now),
+               ocr_status=excluded.ocr_status, ocr_text=excluded.ocr_text,
+               ocr_completed=excluded.ocr_completed, ocr_pickup=excluded.ocr_pickup,
+               ocr_acceptance=excluded.ocr_acceptance, ocr_received=excluded.ocr_received,
+               created_at=excluded.created_at""",
+            (
+                user["id"],
+                sheet_date,
+                delivery_date,
+                public_path,
+                image.filename or "",
+                image.content_type or "",
+                ocr_status,
+                ocr_text,
+                extracted["completed"],
+                extracted["pickup"],
+                extracted["acceptance"],
+                extracted["received"],
+                now,
+            ),
         )
         sheet = conn.execute("SELECT id FROM inspection_sheets WHERE user_id=? AND sheet_date=?", (user["id"], sheet_date)).fetchone()
         conn.commit()
@@ -1842,25 +1944,37 @@ def inspection_sheet_for_user(sheet_id: int, user):
 @app.get("/inspection-sheets/{sheet_id}/correct", response_class=HTMLResponse)
 def inspection_sheet_correct_page(request: Request, sheet_id: int, user=Depends(require_user)):
     sheet = with_image_info(inspection_sheet_for_user(sheet_id, user))
-    delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND work_date=?", (sheet["user_id"], sheet["sheet_date"]))
-    extracted = extract_delivery_counts(sheet["ocr_text"] or "")
+    extracted_fields = extract_inspection_fields(sheet.get("ocr_text", "") or "", fallback_date=sheet.get("delivery_date") or sheet["sheet_date"])
+    target_date = sheet.get("delivery_date") or extracted_fields["work_date"] or sheet["sheet_date"]
+    delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND work_date=?", (sheet["user_id"], target_date))
+    ocr_completed = sheet.get("ocr_completed") or extracted_fields["completed"]
+    ocr_pickup = sheet.get("ocr_pickup") or extracted_fields["pickup"]
     counts = {
-        "completed": delivery["completed"] if delivery else extracted["completed"],
-        "transfer": delivery["transfer"] if delivery else extracted["transfer"],
-        "night": delivery["night"] if delivery else extracted["night"],
-        "pickup": delivery["pickup"] if delivery else extracted["pickup"],
-        "large": delivery["large"] if delivery else extracted["large"],
+        "completed": ocr_completed or (delivery["completed"] if delivery else 0),
+        "transfer": delivery["transfer"] if delivery else 0,
+        "night": delivery["night"] if delivery else 0,
+        "pickup": ocr_pickup or (delivery["pickup"] if delivery else 0),
+        "large": delivery["large"] if delivery else 0,
+    }
+    ocr_result = {
+        "work_date": target_date,
+        "completed": ocr_completed,
+        "pickup": ocr_pickup,
+        "acceptance": sheet.get("ocr_acceptance") or extracted_fields["acceptance"],
+        "received": sheet.get("ocr_received") or extracted_fields["received"],
+        "raw_text": (sheet.get("ocr_text") or "").strip(),
     }
     return render(
         request,
         "inspection_correct.html",
-        {"sheet": sheet, "delivery": delivery, "counts": counts},
+        {"sheet": sheet, "delivery": delivery, "counts": counts, "target_date": target_date, "ocr_result": ocr_result},
     )
 
 
 @app.post("/inspection-sheets/{sheet_id}/correct")
 def apply_inspection_sheet_counts(
     sheet_id: int,
+    work_date: str = Form(...),
     completed: int = Form(0),
     transfer: int = Form(0),
     night: int = Form(0),
@@ -1869,8 +1983,13 @@ def apply_inspection_sheet_counts(
     user=Depends(require_user),
 ):
     sheet = inspection_sheet_for_user(sheet_id, user)
+    target_date = normalize_import_date(work_date)
+    try:
+        datetime.strptime(target_date, "%Y-%m-%d")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="日付はYYYY-MM-DD形式で入力してください") from exc
     now = app_now().isoformat(timespec="seconds")
-    existing = query_one("SELECT * FROM deliveries WHERE user_id=? AND work_date=?", (sheet["user_id"], sheet["sheet_date"]))
+    existing = query_one("SELECT * FROM deliveries WHERE user_id=? AND work_date=?", (sheet["user_id"], target_date))
     memo = existing["memo"] if existing and existing["memo"] else "点検表から反映"
     vehicle_rental = existing["vehicle_rental"] if existing else "none"
     values = {
@@ -1889,7 +2008,7 @@ def apply_inspection_sheet_counts(
                inspection_sheet_path=excluded.inspection_sheet_path, updated_at=excluded.updated_at""",
             (
                 sheet["user_id"],
-                sheet["sheet_date"],
+                target_date,
                 values["completed"],
                 values["transfer"],
                 values["night"],
@@ -1903,15 +2022,20 @@ def apply_inspection_sheet_counts(
             ),
         )
         conn.execute(
-            "UPDATE inspection_sheets SET ocr_status=?, ocr_text=? WHERE id=?",
+            """UPDATE inspection_sheets
+               SET delivery_date=?, ocr_status=?, ocr_completed=?, ocr_pickup=?, ocr_acceptance=?
+               WHERE id=?""",
             (
+                target_date,
                 "反映済み",
-                f"完了={values['completed']}, 転送={values['transfer']}, 夜間={values['night']}, 集荷={values['pickup']}, 大型={values['large']}",
+                values["completed"],
+                values["pickup"],
+                values["pickup"],
                 sheet_id,
             ),
         )
         conn.commit()
-    return RedirectResponse(f"/deliveries?day={sheet['sheet_date']}", status_code=303)
+    return RedirectResponse(f"/deliveries?day={target_date}", status_code=303)
 
 
 @app.get("/rewards", response_class=HTMLResponse)
