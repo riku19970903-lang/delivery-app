@@ -2,11 +2,13 @@ import calendar
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
+import logging
 import os
 from pathlib import Path
 import re
 import sqlite3
-from typing import Optional
+from threading import Lock, Thread
+from typing import List, Optional
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -19,8 +21,11 @@ from itsdangerous import BadSignature, URLSafeSerializer
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "delivery_ops.db"
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 USE_POSTGRES = bool(DATABASE_URL)
+DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "5"))
 try:
     APP_TZ = ZoneInfo(os.getenv("APP_TIMEZONE", "Asia/Tokyo"))
 except ZoneInfoNotFoundError:
@@ -36,6 +41,10 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 app.mount("/uploads", StaticFiles(directory=BASE_DIR / "uploads"), name="uploads")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 serializer = URLSafeSerializer(SECRET_KEY, salt="delivery-ops-session")
+logger = logging.getLogger("delivery_app")
+DB_INIT_LOCK = Lock()
+DB_INIT_DONE = False
+DB_INIT_ERROR = None
 
 
 def app_now():
@@ -95,7 +104,10 @@ class DbConnection:
     def executescript(self, sql: str):
         if not self.use_postgres:
             return self.conn.executescript(sql)
-        return self.execute(sql)
+        result = None
+        for statement in _split_sql_script(sql):
+            result = self.execute(statement)
+        return result
 
     def commit(self):
         self.conn.commit()
@@ -133,6 +145,10 @@ def _postgres_sql(sql: str, return_id: bool = False) -> str:
     return translated
 
 
+def _split_sql_script(sql: str):
+    return [statement.strip() for statement in sql.split(";") if statement.strip()]
+
+
 def _append_sql_clause(sql: str, clause: str) -> str:
     stripped = sql.rstrip()
     has_semicolon = stripped.endswith(";")
@@ -161,7 +177,7 @@ def db():
     if USE_POSTGRES:
         connect_kwargs = {
             "cursor_factory": RealDictCursor,
-            "connect_timeout": 10,
+            "connect_timeout": DB_CONNECT_TIMEOUT,
         }
         if "sslmode=" not in DATABASE_URL.lower():
             connect_kwargs["sslmode"] = "require"
@@ -181,6 +197,12 @@ def db():
         wrapped.close()
 
 
+def ensure_db_initialized():
+    if DB_INIT_DONE:
+        return
+    init_db()
+
+
 def hash_password(password: str) -> str:
     return sha256(password.encode("utf-8")).hexdigest()
 
@@ -193,6 +215,7 @@ def safe_upload_name(original_name: str):
 
 
 def execute(sql: str, params=()):
+    ensure_db_initialized()
     with db() as conn:
         cur = conn.execute(sql, params)
         conn.commit()
@@ -200,11 +223,13 @@ def execute(sql: str, params=()):
 
 
 def query_one(sql: str, params=()):
+    ensure_db_initialized()
     with db() as conn:
         return conn.execute(sql, params).fetchone()
 
 
 def query_all(sql: str, params=()):
+    ensure_db_initialized()
     with db() as conn:
         return conn.execute(sql, params).fetchall()
 
@@ -311,7 +336,7 @@ def simple_japanese_holidays(year: int):
     return days
 
 
-def init_db():
+def _init_db_schema():
     with db() as conn:
         conn.executescript(
             """
@@ -530,9 +555,56 @@ def init_db():
     ensure_vehicle_issue_schema()
 
 
+def init_db():
+    global DB_INIT_DONE, DB_INIT_ERROR
+    if DB_INIT_DONE:
+        return
+    with DB_INIT_LOCK:
+        if DB_INIT_DONE:
+            return
+        try:
+            _init_db_schema()
+        except Exception as exc:
+            DB_INIT_ERROR = exc
+            raise
+        else:
+            DB_INIT_DONE = True
+            DB_INIT_ERROR = None
+
+
+def safe_startup_init_db():
+    try:
+        init_db()
+    except Exception:
+        logger.exception("Database initialization failed; continuing startup so Render can bind the port.")
+
+
 @app.on_event("startup")
 def startup():
-    init_db()
+    if USE_POSTGRES:
+        Thread(target=safe_startup_init_db, daemon=True).start()
+    else:
+        safe_startup_init_db()
+
+
+@app.get("/healthz")
+def healthz():
+    return {
+        "ok": True,
+        "database": "postgresql" if USE_POSTGRES else "sqlite",
+        "db_initialized": DB_INIT_DONE,
+        "db_init_error": DB_INIT_ERROR.__class__.__name__ if DB_INIT_ERROR else "",
+    }
+
+
+@app.get("/health")
+def health():
+    return healthz()
+
+
+@app.get("/readyz")
+def readyz():
+    return healthz()
 
 
 def current_user(request: Request):
@@ -1076,7 +1148,7 @@ async def save_delivery(
     large: int = Form(0),
     vehicle_rental: str = Form("none"),
     memo: str = Form(""),
-    inspection_image: UploadFile | None = File(None),
+    inspection_image: Optional[UploadFile] = File(None),
     user=Depends(require_user),
 ):
     if user["role"] == "admin":
@@ -1484,7 +1556,7 @@ def save_shift(
     member_id: int = Form(...),
     shift_date: str = Form(...),
     status: str = Form(...),
-    town_ids: list[int] = Form(default=[]),
+    town_ids: List[int] = Form(default=[]),
     user=Depends(require_admin),
 ):
     allowed = {"出勤", "1便", "2便", "3便", "休み"}
