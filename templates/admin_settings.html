@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>設定</h1>
+{% if error %}<p class="alert">{{ error }}</p>{% endif %}
+{% if message %}<p class="success">{{ message }}</p>{% endif %}
+
+<section class="panel settings-panel">
+  <h2>管理者アカウント</h2>
+  <form method="post" action="/admin/settings/account" class="formgrid" onsubmit="return confirm('管理者のログイン情報を変更します。保存しますか？');">
+    <label>ログインID<input name="username" value="{{ user.username }}" required autocomplete="username"></label>
+    <label>新しいパスワード<input name="password" type="password" placeholder="変更時だけ入力" autocomplete="new-password"></label>
+    <button class="primary">管理者情報を保存</button>
+  </form>
+</section>
+
+<section class="panel settings-panel">
+  <h2>メンバーログイン設定</h2>
+  {% for m in members %}
+  <form method="post" action="/admin/settings/member" class="formgrid settings-row" onsubmit="return confirm('{{ m.name }}さんのログイン情報を変更します。保存しますか？');">
+    <input type="hidden" name="member_id" value="{{ m.id }}">
+    <label>名前<input value="{{ m.name }}" readonly></label>
+    <label>ログインID<input name="username" value="{{ m.username }}" required autocomplete="off"></label>
+    <label>新しいパスワード<input name="password" type="password" placeholder="変更時だけ入力" autocomplete="new-password"></label>
+    <label>状態<input value="{{ '在籍中' if m.active else '退職済み' }}" readonly></label>
+    <button class="primary">保存</button>
+  </form>
+  {% else %}
+  <p class="hint">メンバーがいません。</p>
+  {% endfor %}
+</section>
+{% endblock %}

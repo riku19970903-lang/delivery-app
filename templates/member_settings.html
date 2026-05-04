@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>設定</h1>
+{% if error %}<p class="alert">{{ error }}</p>{% endif %}
+{% if message %}<p class="success">{{ message }}</p>{% endif %}
+
+<section class="panel settings-panel">
+  <h2>パスワード変更</h2>
+  <form method="post" action="/settings/password" class="formgrid" onsubmit="return confirm('パスワードを変更します。保存しますか？');">
+    <label>現在のパスワード<input name="current_password" type="password" required autocomplete="current-password"></label>
+    <label>新しいパスワード<input name="new_password" type="password" required autocomplete="new-password"></label>
+    <label>新しいパスワード（確認）<input name="confirm_password" type="password" required autocomplete="new-password"></label>
+    <button class="primary">パスワードを変更</button>
+  </form>
+</section>
+{% endblock %}
