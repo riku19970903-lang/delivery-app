@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel missing-image-panel">
+  <p class="eyebrow">SPARKLE DRIVE</p>
+  <h1>画像を表示できません</h1>
+  <p class="alert">{{ message }}</p>
+  {% if path %}<p class="hint">保存されているパス: {{ path }}</p>{% endif %}
+  <div class="actions">
+    <a class="button primary" href="/inspection-sheets">点検表を再アップロード</a>
+    <a class="button" href="/deliveries">配達入力へ</a>
+  </div>
+</section>
+{% endblock %}

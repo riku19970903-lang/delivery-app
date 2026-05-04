@@ -15,8 +15,11 @@
   </label>
   <div class="preview-box">
     <p class="field-title">プレビュー</p>
-    {% if inspection_image_path %}
-    <a href="{{ inspection_image_path }}" target="_blank"><img id="inspection-preview" class="thumb large-thumb" src="{{ inspection_image_path }}" alt="点検表"></a>
+    {% if inspection_image.image_available %}
+    <a href="{{ inspection_image.image_view_url }}" target="_blank"><img id="inspection-preview" class="thumb large-thumb" src="{{ inspection_image.image_view_url }}" alt="点検表" loading="lazy"></a>
+    {% elif inspection_image.image_missing %}
+    <p class="alert">{{ inspection_image.image_label }}</p>
+    <img id="inspection-preview" class="thumb large-thumb hidden" alt="点検表プレビュー">
     {% else %}
     <img id="inspection-preview" class="thumb large-thumb hidden" alt="点検表プレビュー">
     <p id="inspection-empty" class="hint">画像を選択するとここに表示されます。</p>

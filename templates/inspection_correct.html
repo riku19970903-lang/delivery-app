@@ -5,10 +5,16 @@
 <section class="panel inspection-correct">
   <div>
     <p class="field-title">{{ sheet.sheet_date }} / {{ sheet.member_name }}</p>
-    <a href="{{ sheet.file_path }}" target="_blank">
-      <img class="inspection-photo" src="{{ sheet.file_path }}" alt="点検表画像">
+    {% if sheet.image_available %}
+    <a href="{{ sheet.image_view_url }}" target="_blank">
+      <img class="inspection-photo" src="{{ sheet.image_view_url }}" alt="点検表画像">
     </a>
-    <p class="hint">状態: {{ sheet.ocr_status }}。画像を見ながら、読み取れた個数を確認・補正してください。</p>
+    {% elif sheet.image_missing %}
+    <p class="alert">{{ sheet.image_label }}</p>
+    {% else %}
+    <p class="hint">画像未登録</p>
+    {% endif %}
+    <p class="hint">状態: {{ sheet.ocr_status }}。画像が表示できる場合は、見ながら読み取れた個数を確認・補正してください。</p>
   </div>
 
   <form method="post" class="formgrid count-form">

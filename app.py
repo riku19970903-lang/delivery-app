@@ -11,9 +11,12 @@ from pathlib import Path
 import re
 import sqlite3
 from threading import Lock, Thread
+from time import monotonic
 from typing import List, Optional
 import unicodedata
 from urllib.parse import quote
+from urllib.error import HTTPError, URLError
+from urllib.request import Request as UrlRequest, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -29,7 +32,19 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 USE_POSTGRES = bool(DATABASE_URL)
-DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "5"))
+DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "3"))
+DB_INIT_RETRY_SECONDS = int(os.getenv("DB_INIT_RETRY_SECONDS", "30"))
+APP_NAME = "SPARKLE DRIVE"
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_STORAGE_KEY = (
+    os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    or os.getenv("SUPABASE_SERVICE_KEY")
+    or os.getenv("SUPABASE_STORAGE_KEY")
+    or os.getenv("SUPABASE_ANON_KEY")
+    or ""
+)
+SUPABASE_STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "inspection-sheets")
+SUPABASE_STORAGE_PUBLIC_BASE = os.getenv("SUPABASE_STORAGE_PUBLIC_URL_BASE", "").rstrip("/")
 try:
     APP_TZ = ZoneInfo(os.getenv("APP_TIMEZONE", "Asia/Tokyo"))
 except ZoneInfoNotFoundError:
@@ -40,7 +55,7 @@ SECRET_KEY = "change-this-local-secret"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 SLIP_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="配送業務管理MVP")
+app = FastAPI(title=APP_NAME)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 app.mount("/uploads", StaticFiles(directory=BASE_DIR / "uploads"), name="uploads")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
@@ -49,6 +64,7 @@ logger = logging.getLogger("delivery_app")
 DB_INIT_LOCK = Lock()
 DB_INIT_DONE = False
 DB_INIT_ERROR = None
+DB_INIT_LAST_ATTEMPT = 0.0
 SHIFT_ALLOWED_STATUSES = {"出勤", "1便", "2便", "3便", "休み"}
 SHIFT_IMPORT_HEADERS = ["日付", "名前", "出勤区分", "配達エリア", "便", "備考"]
 SHIFT_IMPORT_LIMIT = 500
@@ -208,6 +224,8 @@ def db():
 def ensure_db_initialized():
     if DB_INIT_DONE:
         return
+    if USE_POSTGRES and DB_INIT_ERROR and monotonic() - DB_INIT_LAST_ATTEMPT < DB_INIT_RETRY_SECONDS:
+        raise HTTPException(status_code=503, detail="DB初期化に失敗しています。少し時間をおいて再読み込みしてください。")
     init_db()
 
 
@@ -220,6 +238,107 @@ def safe_upload_name(original_name: str):
     if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif"}:
         suffix = ".jpg"
     return suffix
+
+
+def supabase_storage_enabled():
+    return bool(SUPABASE_URL and SUPABASE_STORAGE_KEY and SUPABASE_STORAGE_BUCKET)
+
+
+def _storage_path(folder: str, filename: str):
+    clean_folder = folder.strip("/").replace("\\", "/")
+    clean_name = Path(filename).name
+    return f"{clean_folder}/{clean_name}"
+
+
+def _encoded_storage_path(storage_path: str):
+    return "/".join(quote(part, safe="") for part in storage_path.split("/"))
+
+
+def upload_to_supabase_storage(folder: str, filename: str, data: bytes, content_type: str):
+    if not supabase_storage_enabled():
+        return ""
+    storage_path = _storage_path(folder, filename)
+    encoded_path = _encoded_storage_path(storage_path)
+    url = f"{SUPABASE_URL}/storage/v1/object/{quote(SUPABASE_STORAGE_BUCKET, safe='')}/{encoded_path}"
+    request = UrlRequest(
+        url,
+        data=data,
+        method="POST",
+        headers={
+            "apikey": SUPABASE_STORAGE_KEY,
+            "Authorization": f"Bearer {SUPABASE_STORAGE_KEY}",
+            "Content-Type": content_type or "application/octet-stream",
+            "Cache-Control": "3600",
+            "x-upsert": "true",
+        },
+    )
+    try:
+        with urlopen(request, timeout=DB_CONNECT_TIMEOUT) as response:
+            if response.status >= 400:
+                logger.warning("Supabase Storage upload failed: %s", response.status)
+                return ""
+    except (HTTPError, URLError, TimeoutError, OSError):
+        logger.exception("Supabase Storage upload failed; falling back to local uploads.")
+        return ""
+    if SUPABASE_STORAGE_PUBLIC_BASE:
+        return f"{SUPABASE_STORAGE_PUBLIC_BASE}/{encoded_path}"
+    return f"{SUPABASE_URL}/storage/v1/object/public/{quote(SUPABASE_STORAGE_BUCKET, safe='')}/{encoded_path}"
+
+
+def save_inspection_image(data: bytes, filename: str, content_type: str, folder: str, local_dir: Path):
+    remote_url = upload_to_supabase_storage(folder, filename, data, content_type)
+    if remote_url:
+        return remote_url, None
+    local_dir.mkdir(parents=True, exist_ok=True)
+    disk_path = local_dir / filename
+    disk_path.write_bytes(data)
+    return f"/uploads/{folder}/{filename}", disk_path
+
+
+def is_remote_image_path(path: str):
+    return bool(path and re.match(r"^https?://", path, flags=re.IGNORECASE))
+
+
+def allowed_local_image_path(path: str):
+    return bool(
+        path
+        and (
+            path.startswith("/uploads/inspection_sheets/")
+            or path.startswith("/uploads/inspection_slips/")
+        )
+    )
+
+
+def local_image_exists(path: str):
+    return allowed_local_image_path(path) and (BASE_DIR / path.lstrip("/")).exists()
+
+
+def inspection_image_info(path: str):
+    path = path or ""
+    if not path:
+        return {"image_path": "", "image_available": False, "image_missing": False, "image_view_url": "", "image_label": "画像なし"}
+    if is_remote_image_path(path):
+        return {"image_path": path, "image_available": True, "image_missing": False, "image_view_url": path, "image_label": "画像あり"}
+    view_url = f"/inspection-file?path={quote(path, safe='')}"
+    if local_image_exists(path):
+        return {"image_path": path, "image_available": True, "image_missing": False, "image_view_url": view_url, "image_label": "画像あり"}
+    return {
+        "image_path": path,
+        "image_available": False,
+        "image_missing": True,
+        "image_view_url": view_url,
+        "image_label": "画像ファイルが見つかりません。再アップロードしてください",
+    }
+
+
+def with_image_info(row, path_field="file_path"):
+    item = dict(row)
+    item.update(inspection_image_info(item.get(path_field, "")))
+    return item
+
+
+def attach_image_info(rows, path_field="file_path"):
+    return [with_image_info(row, path_field) for row in rows]
 
 
 def execute(sql: str, params=()):
@@ -607,12 +726,13 @@ def _init_db_schema():
 
 
 def init_db():
-    global DB_INIT_DONE, DB_INIT_ERROR
+    global DB_INIT_DONE, DB_INIT_ERROR, DB_INIT_LAST_ATTEMPT
     if DB_INIT_DONE:
         return
     with DB_INIT_LOCK:
         if DB_INIT_DONE:
             return
+        DB_INIT_LAST_ATTEMPT = monotonic()
         try:
             _init_db_schema()
         except Exception as exc:
@@ -682,9 +802,25 @@ def require_admin(user=Depends(require_user)):
     return user
 
 
+@app.get("/inspection-file", response_class=HTMLResponse)
+def inspection_file(request: Request, path: str = "", user=Depends(require_user)):
+    if is_remote_image_path(path):
+        return RedirectResponse(path, status_code=303)
+    if local_image_exists(path):
+        return RedirectResponse(path, status_code=303)
+    return render(
+        request,
+        "image_missing.html",
+        {
+            "path": path,
+            "message": "画像ファイルが見つかりません。再アップロードしてください。",
+        },
+    )
+
+
 def render(request: Request, name: str, context: dict):
     user = current_user(request)
-    context.update({"request": request, "user": user, "today": app_today().isoformat()})
+    context.update({"request": request, "user": user, "today": app_today().isoformat(), "app_name": APP_NAME})
     return templates.TemplateResponse(name, context)
 
 
@@ -737,15 +873,29 @@ def attach_shift_areas(shifts):
         area_map.setdefault(area["shift_id"], []).append(area["town_name"])
         short_map.setdefault(area["shift_id"], []).append((area["district_name"], area["town_name"]))
     for item in items:
-        areas = area_map.get(item["id"], [])
-        if not areas and item.get("area_label"):
-            areas = [part.strip() for part in item["area_label"].split("・") if part.strip()]
+        label_pairs = parse_area_label(item.get("area_label", ""))
+        if label_pairs:
+            areas = [town_name for _, town_name in label_pairs]
+        else:
+            areas = area_map.get(item["id"], [])
         if item["status"] == "休み":
             areas = []
         item["areas"] = areas
         item["area_text"] = "、".join(areas)
-        item["area_short_text"] = shorten_areas(short_map.get(item["id"], [])) if item["status"] != "休み" else ""
+        short_pairs = label_pairs or short_map.get(item["id"], [])
+        item["area_short_text"] = shorten_areas(short_pairs) if item["status"] != "休み" else ""
     return items
+
+
+def parse_area_label(area_label):
+    pairs = []
+    for part in (area_label or "").split("・"):
+        if "/" not in part:
+            continue
+        district_name, town_name = [value.strip() for value in part.split("/", 1)]
+        if district_name and town_name:
+            pairs.append((district_name, town_name))
+    return pairs
 
 
 def shorten_areas(area_pairs):
@@ -1072,7 +1222,6 @@ def upsert_shift_with_towns(conn, member_id, shift_date, status, town_rows, note
         ),
     )
     shift = conn.execute("SELECT id FROM shifts WHERE user_id=? AND shift_date=?", (member_id, shift_date)).fetchone()
-    conn.execute("DELETE FROM shift_towns WHERE shift_id=?", (shift["id"],))
     if status != "休み":
         for town in town_rows:
             conn.execute("INSERT OR IGNORE INTO shift_towns(shift_id, town_id) VALUES (?, ?)", (shift["id"], town["id"]))
@@ -1135,27 +1284,41 @@ def monthly_reward_summary(user_id: int, target_month: date):
     else:
         next_month = start.replace(month=start.month + 1)
     end = next_month - timedelta(days=1)
-    rows = query_all(
-        "SELECT * FROM deliveries WHERE user_id=? AND work_date BETWEEN ? AND ? ORDER BY work_date",
+    summary = query_one(
+        """SELECT
+              COALESCE(SUM(completed), 0) AS completed_total,
+              COALESCE(SUM(transfer), 0) AS transfer_total,
+              COALESCE(SUM(night), 0) AS night_total,
+              COALESCE(SUM(pickup), 0) AS pickup_total,
+              COALESCE(SUM(large), 0) AS large_total,
+              COUNT(*) AS delivery_days
+           FROM deliveries
+           WHERE user_id=? AND work_date BETWEEN ? AND ?""",
         (user_id, start.isoformat(), end.isoformat()),
     )
     rates = query_one("SELECT * FROM rates WHERE user_id=?", (user_id,))
-    vehicle_rates = query_one("SELECT * FROM vehicle_rates WHERE id=1")
-    gross_total = sum(calc_reward_gross(row, rates) for row in rows)
-    net_total = 0
-    completed_total = sum(row["completed"] for row in rows)
-    monthly_deducted = False
+    if not rates:
+        return {"gross_total": 0, "net_total": 0, "vehicle_deduction": 0, "completed_total": 0, "rows": []}
+    gross_total = (
+        summary["completed_total"] * rates["delivery_unit"]
+        + summary["transfer_total"] * rates["transfer_unit"]
+        + summary["night_total"] * rates["night_unit"]
+        + summary["pickup_total"] * rates["pickup_unit"]
+        + summary["large_total"] * rates["large_unit"]
+    )
     rental_type = rates["vehicle_rental_type"] if rates and "vehicle_rental_type" in rates.keys() else "none"
-    for row in rows:
-        monthly_mode = rental_type == "monthly" and not monthly_deducted
-        net_total += calc_reward(row, rates, vehicle_rates, monthly_mode=monthly_mode)
-        monthly_deducted = monthly_deducted or monthly_mode
+    vehicle_deduction = 0
+    if rental_type == "daily":
+        vehicle_deduction = summary["delivery_days"] * rates["vehicle_daily_fee"]
+    elif rental_type == "monthly" and summary["delivery_days"]:
+        vehicle_deduction = rates["vehicle_monthly_fee"]
+    net_total = gross_total - vehicle_deduction
     return {
         "gross_total": gross_total,
         "net_total": net_total,
-        "vehicle_deduction": gross_total - net_total,
-        "completed_total": completed_total,
-        "rows": rows,
+        "vehicle_deduction": vehicle_deduction,
+        "completed_total": summary["completed_total"],
+        "rows": [],
     }
 
 
@@ -1276,6 +1439,7 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
            WHERE d.work_date = ? ORDER BY u.name LIMIT 100""",
         (today_s,),
     )
+    deliveries = attach_image_info(deliveries, "slip_path")
     return render(
         request,
         "admin_dashboard.html",
@@ -1426,13 +1590,12 @@ def member_home(request: Request, user=Depends(require_user)):
     delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND work_date=?", (user["id"], today_s))
     rates = query_one("SELECT * FROM rates WHERE user_id=?", (user["id"],))
     vehicle_rates = query_one("SELECT * FROM vehicle_rates WHERE id=1")
-    shift = query_one("SELECT * FROM shifts WHERE user_id=? AND shift_date=? AND decided=1", (user["id"], today_s))
     reward = calc_reward(delivery, rates, vehicle_rates) if delivery else 0
-    comment = auto_comment(delivery, reward, bool(shift))
     month_summary = monthly_reward_summary(user["id"], app_today())
     shifts = upcoming_member_shifts(user["id"], today_s)
     today_shift = shifts[0] if shifts and shifts[0]["shift_date"] == today_s else None
     next_shifts = [item for item in shifts if item["shift_date"] != today_s][:2]
+    comment = auto_comment(delivery, reward, bool(today_shift))
     return render(
         request,
         "member_home.html",
@@ -1440,7 +1603,7 @@ def member_home(request: Request, user=Depends(require_user)):
             "delivery": delivery,
             "reward": reward,
             "comment": comment,
-            "shift": shift,
+            "shift": today_shift,
             "month_summary": month_summary,
             "today_shift": today_shift,
             "next_shifts": next_shifts,
@@ -1502,6 +1665,7 @@ def delivery_page(request: Request, day: Optional[str] = None, user=Depends(requ
                WHERE d.work_date=? ORDER BY u.name LIMIT 300""",
             (target,),
         )
+        rows = attach_image_info(rows, "slip_path")
         return render(request, "admin_deliveries.html", {"rows": rows, "target": target})
     delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND work_date=?", (user["id"], target))
     slip = query_one("SELECT * FROM inspection_slips WHERE user_id=? AND slip_date=?", (user["id"], target))
@@ -1516,6 +1680,7 @@ def delivery_page(request: Request, day: Optional[str] = None, user=Depends(requ
         inspection_image_path = delivery["inspection_sheet_path"]
     elif sheet:
         inspection_image_path = sheet["file_path"]
+    inspection_image = inspection_image_info(inspection_image_path)
     return render(
         request,
         "deliveries.html",
@@ -1524,6 +1689,7 @@ def delivery_page(request: Request, day: Optional[str] = None, user=Depends(requ
             "slip": slip,
             "sheet": sheet,
             "inspection_image_path": inspection_image_path,
+            "inspection_image": inspection_image,
             "target": target,
             "reward": reward,
             "comment": auto_comment(delivery, reward),
@@ -1572,10 +1738,7 @@ async def save_delivery(
             if len(data) > max_size:
                 data = data[:max_size]
             filename = f"user{user['id']}_{work_date.replace('-', '')}_{now_dt.strftime('%H%M%S%f')}{suffix}"
-            disk_path = SLIP_UPLOAD_DIR / filename
-            disk_path.write_bytes(data)
-            public_path = f"/uploads/inspection_slips/{filename}"
-            existing = query_one("SELECT file_path FROM inspection_slips WHERE user_id=? AND slip_date=?", (user["id"], work_date))
+            public_path, _ = save_inspection_image(data, filename, inspection_image.content_type or "", "inspection_slips", SLIP_UPLOAD_DIR)
             with db() as conn:
                 conn.execute(
                     """INSERT INTO inspection_slips(user_id, delivery_id, slip_date, file_path, original_filename, content_type, uploaded_at)
@@ -1587,13 +1750,6 @@ async def save_delivery(
                 )
                 conn.execute("UPDATE deliveries SET inspection_sheet_path=?, updated_at=? WHERE id=?", (public_path, now, delivery["id"]))
                 conn.commit()
-            if existing and existing["file_path"].startswith("/uploads/inspection_slips/"):
-                old_path = BASE_DIR / existing["file_path"].lstrip("/")
-                if old_path.exists() and old_path != disk_path:
-                    try:
-                        old_path.unlink()
-                    except OSError:
-                        pass
     return RedirectResponse(f"/deliveries?day={work_date}", status_code=303)
 
 
@@ -1614,6 +1770,7 @@ def inspection_sheets_page(request: Request, day: Optional[str] = None, member_i
                 ORDER BY u.name LIMIT 200""",
             params,
         )
+        sheets = attach_image_info(sheets)
         submitted_rows = query_all(
             f"""SELECT s.user_id FROM inspection_sheets s
                 JOIN users u ON u.id=s.user_id
@@ -1623,7 +1780,7 @@ def inspection_sheets_page(request: Request, day: Optional[str] = None, member_i
         submitted_ids = {sheet["user_id"] for sheet in submitted_rows}
         missing_members = [member for member in members if member["id"] not in submitted_ids and (not member_id or member["id"] == member_id)]
         return render(request, "inspection_admin.html", {"target": target, "members": members, "member_id": member_id, "sheets": sheets, "missing_members": missing_members})
-    sheets = query_all("SELECT * FROM inspection_sheets WHERE user_id=? ORDER BY sheet_date DESC LIMIT 30", (user["id"],))
+    sheets = attach_image_info(query_all("SELECT * FROM inspection_sheets WHERE user_id=? ORDER BY sheet_date DESC LIMIT 30", (user["id"],)))
     return render(request, "inspection_member.html", {"target": target, "sheets": sheets})
 
 
@@ -1645,10 +1802,9 @@ async def upload_inspection_sheet(sheet_date: str = Form(...), image: UploadFile
     if len(data) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="画像サイズは10MB以内にしてください")
     disk_path.write_bytes(data)
-    public_path = f"/uploads/inspection_sheets/{filename}"
+    public_path = upload_to_supabase_storage("inspection_sheets", filename, data, image.content_type or "") or f"/uploads/inspection_sheets/{filename}"
     ocr_text = extract_ocr_text(disk_path)
     ocr_status = "OCR確認待ち" if ocr_text else "手入力待ち"
-    existing = query_one("SELECT file_path FROM inspection_sheets WHERE user_id=? AND sheet_date=?", (user["id"], sheet_date))
     with db() as conn:
         conn.execute(
             """INSERT INTO inspection_sheets(user_id, sheet_date, file_path, original_filename, content_type, ocr_status, ocr_text, created_at)
@@ -1660,13 +1816,6 @@ async def upload_inspection_sheet(sheet_date: str = Form(...), image: UploadFile
         )
         sheet = conn.execute("SELECT id FROM inspection_sheets WHERE user_id=? AND sheet_date=?", (user["id"], sheet_date)).fetchone()
         conn.commit()
-    if existing and existing["file_path"].startswith("/uploads/inspection_sheets/"):
-        old_path = BASE_DIR / existing["file_path"].lstrip("/")
-        if old_path.exists() and old_path != disk_path:
-            try:
-                old_path.unlink()
-            except OSError:
-                pass
     return RedirectResponse(f"/inspection-sheets/{sheet['id']}/correct", status_code=303)
 
 
@@ -1692,7 +1841,7 @@ def inspection_sheet_for_user(sheet_id: int, user):
 
 @app.get("/inspection-sheets/{sheet_id}/correct", response_class=HTMLResponse)
 def inspection_sheet_correct_page(request: Request, sheet_id: int, user=Depends(require_user)):
-    sheet = inspection_sheet_for_user(sheet_id, user)
+    sheet = with_image_info(inspection_sheet_for_user(sheet_id, user))
     delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND work_date=?", (sheet["user_id"], sheet["sheet_date"]))
     extracted = extract_delivery_counts(sheet["ocr_text"] or "")
     counts = {

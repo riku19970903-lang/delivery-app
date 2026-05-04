@@ -17,7 +17,7 @@
     {% for s in sheets %}
     <tr>
       <td>{{ s.sheet_date }}</td>
-      <td><a href="{{ s.file_path }}" target="_blank"><img class="thumb" src="{{ s.file_path }}" alt="点検表"></a></td>
+      <td>{% if s.image_available %}<a class="button mini-button" href="{{ s.image_view_url }}" target="_blank">画像を見る</a><br><span class="success mini-badge">画像あり</span>{% elif s.image_missing %}<span class="alert mini-badge">{{ s.image_label }}</span>{% else %}<span class="hint mini-badge">画像なし</span>{% endif %}</td>
       <td>{{ s.ocr_status }}</td>
       <td><a class="button mini-button" href="/inspection-sheets/{{ s.id }}/correct">確認・補正</a></td>
       <td>{{ s.created_at }}</td>
