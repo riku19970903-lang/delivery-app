@@ -27,7 +27,13 @@
     <tr>
       <td>{{ s.sheet_date }}</td>
       <td>{{ s.name }}</td>
-      <td><a href="{{ s.file_path }}" target="_blank"><img class="thumb large-thumb" src="{{ s.file_path }}" alt="点検表"></a></td>
+      <td>
+        {% if s.file_path %}
+        <a href="{{ s.file_path }}" target="_blank"><img class="thumb large-thumb" src="{{ s.file_path }}" alt="点検表" loading="lazy"></a>
+        {% else %}
+        <span class="hint">画像未登録</span>
+        {% endif %}
+      </td>
       <td>{{ s.ocr_status }}</td>
       <td><a class="button mini-button" href="/inspection-sheets/{{ s.id }}/correct">確認・補正</a></td>
       <td>{{ s.created_at }}</td>

@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>シフト一括インポート確認</h1>
+
+{% if error %}<p class="alert">{{ error }}</p>{% endif %}
+
+<section class="panel">
+  <div class="actions">
+    <a class="button" href="/shifts">シフト画面へ戻る</a>
+    <a class="button" href="/admin/shifts/import-template">テンプレートをダウンロード</a>
+  </div>
+  {% if filename %}<p class="hint">確認中のファイル: {{ filename }}</p>{% endif %}
+</section>
+
+<section class="panel tablewrap">
+  <h2>取り込み内容</h2>
+  <table>
+    <tr>
+      <th>行</th>
+      <th>日付</th>
+      <th>メンバー</th>
+      <th>出勤区分</th>
+      <th>配達エリア</th>
+      <th>備考</th>
+      <th>確認</th>
+    </tr>
+    {% for row in rows %}
+    <tr class="{% if row.errors %}row-error{% elif row.conflict %}row-conflict{% endif %}">
+      <td>{{ row.row_number }}</td>
+      <td>{{ row.shift_date }}</td>
+      <td>
+        {{ row.member_name }}
+        {% if row.resolved_member_name and row.resolved_member_name != row.member_name %}
+        <br><span class="hint">→ {{ row.resolved_member_name }}</span>
+        {% endif %}
+      </td>
+      <td>{{ row.status }}</td>
+      <td>
+        {% if row.status == "休み" %}
+        -
+        {% else %}
+        <b>{{ row.area_preview or "未確認" }}</b>
+        {% if row.area_text %}<br><span class="hint">入力: {{ row.area_text }}</span>{% endif %}
+        {% endif %}
+      </td>
+      <td>{{ row.note }}</td>
+      <td>
+        {% if row.errors %}
+        <span class="import-badge import-error">{{ row.errors|join("、") }}</span>
+        {% elif row.conflict %}
+        <span class="import-badge import-conflict">既存シフトあり</span>
+        {% else %}
+        <span class="import-badge import-new">新規</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">確認できる行がありません。</td></tr>
+    {% endfor %}
+  </table>
+</section>
+
+{% if rows and not has_errors %}
+<form method="post" action="/admin/shifts/import/commit" class="panel import-confirm-form">
+  <textarea name="payload" class="hidden">{{ payload }}</textarea>
+  {% if has_conflicts %}
+  <label class="check">
+    <input type="checkbox" name="overwrite_conflicts" value="yes">
+    同じ日付・同じメンバーの既存シフトを上書きする
+  </label>
+  {% endif %}
+  <button class="primary">この内容で登録する</button>
+</form>
+{% endif %}
+{% endblock %}

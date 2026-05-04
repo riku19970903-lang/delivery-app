@@ -1,7 +1,10 @@
 import calendar
+import csv
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
+import io
+import json
 import logging
 import os
 from pathlib import Path
@@ -9,11 +12,12 @@ import re
 import sqlite3
 from threading import Lock, Thread
 from typing import List, Optional
+import unicodedata
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeSerializer
@@ -45,6 +49,10 @@ logger = logging.getLogger("delivery_app")
 DB_INIT_LOCK = Lock()
 DB_INIT_DONE = False
 DB_INIT_ERROR = None
+SHIFT_ALLOWED_STATUSES = {"出勤", "1便", "2便", "3便", "休み"}
+SHIFT_IMPORT_HEADERS = ["日付", "名前", "出勤区分", "配達エリア", "便", "備考"]
+SHIFT_IMPORT_LIMIT = 500
+FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
 
 
 def app_now():
@@ -510,16 +518,59 @@ def _init_db_schema():
             );
             """
         )
+        ensure_column(conn, "users", "phone", "TEXT DEFAULT ''")
+        ensure_column(conn, "users", "vehicle", "TEXT DEFAULT ''")
+        ensure_column(conn, "users", "active", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "users", "purged", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "users", "deleted_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "users", "created_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "rates", "delivery_unit", "INTEGER NOT NULL DEFAULT 180")
+        ensure_column(conn, "rates", "transfer_unit", "INTEGER NOT NULL DEFAULT 80")
+        ensure_column(conn, "rates", "night_unit", "INTEGER NOT NULL DEFAULT 120")
+        ensure_column(conn, "rates", "pickup_unit", "INTEGER NOT NULL DEFAULT 100")
+        ensure_column(conn, "rates", "large_unit", "INTEGER NOT NULL DEFAULT 150")
         ensure_column(conn, "rates", "vehicle_rental_type", "TEXT NOT NULL DEFAULT 'none'")
         ensure_column(conn, "rates", "vehicle_daily_fee", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "rates", "vehicle_monthly_fee", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_logs", "alcohol_result", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_logs", "detector_used", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_logs", "intoxicated", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_logs", "health_status", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_logs", "face_check", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_logs", "breath_check", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_logs", "voice_check", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_logs", "admin_confirm", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_logs", "notes", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_logs", "created_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "deliveries", "completed", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "deliveries", "transfer", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "deliveries", "night", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "deliveries", "pickup", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "deliveries", "large", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "deliveries", "vehicle_rental", "TEXT NOT NULL DEFAULT 'none'")
+        ensure_column(conn, "deliveries", "memo", "TEXT DEFAULT ''")
+        ensure_column(conn, "deliveries", "inspection_sheet_path", "TEXT DEFAULT ''")
+        ensure_column(conn, "deliveries", "created_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "deliveries", "updated_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "shifts", "start_time", "TEXT DEFAULT ''")
+        ensure_column(conn, "shifts", "end_time", "TEXT DEFAULT ''")
+        ensure_column(conn, "shifts", "note", "TEXT DEFAULT ''")
         ensure_column(conn, "shifts", "district_id", "INTEGER")
         ensure_column(conn, "shifts", "town_id", "INTEGER")
         ensure_column(conn, "shifts", "area_label", "TEXT DEFAULT ''")
-        ensure_column(conn, "deliveries", "inspection_sheet_path", "TEXT DEFAULT ''")
+        ensure_column(conn, "shifts", "decided", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "shifts", "updated_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_sheets", "file_path", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_sheets", "original_filename", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_sheets", "content_type", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_sheets", "ocr_status", "TEXT DEFAULT '未処理'")
+        ensure_column(conn, "inspection_sheets", "ocr_text", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_sheets", "created_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_slips", "file_path", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_slips", "original_filename", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_slips", "content_type", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_slips", "uploaded_at", "TEXT DEFAULT ''")
         ensure_column(conn, "vehicle_issues", "status", "TEXT NOT NULL DEFAULT '未対応'")
-        ensure_column(conn, "users", "purged", "INTEGER NOT NULL DEFAULT 0")
-        ensure_column(conn, "users", "deleted_at", "TEXT DEFAULT ''")
         admin = conn.execute("SELECT id FROM users WHERE username = 'admin'").fetchone()
         if not admin:
             now = datetime.now().isoformat(timespec="seconds")
@@ -714,6 +765,332 @@ def shorten_areas(area_pairs):
     return " / ".join(parts)
 
 
+def normalize_text(value):
+    if value is None:
+        return ""
+    return unicodedata.normalize("NFKC", str(value)).strip()
+
+
+def compact_area_key(value):
+    text = normalize_text(value).translate(FULLWIDTH_DIGITS)
+    text = re.sub(r"\s+", "", text)
+    return text.replace("丁目", "")
+
+
+def normalize_import_date(value):
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    text = normalize_text(value).translate(FULLWIDTH_DIGITS)
+    if not text:
+        return ""
+    text = text.replace("年", "-").replace("月", "-").replace("日", "")
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except ValueError:
+            pass
+    if re.fullmatch(r"\d{8}", text):
+        try:
+            return datetime.strptime(text, "%Y%m%d").date().isoformat()
+        except ValueError:
+            pass
+    return text
+
+
+def normalize_shift_status(status_value, bin_value=""):
+    status = normalize_text(status_value)
+    bin_label = normalize_text(bin_value)
+    aliases = {"休": "休み", "休日": "休み"}
+    status = aliases.get(status, status)
+    if status in {"1", "2", "3"}:
+        status = f"{status}便"
+    if bin_label in {"1", "2", "3"}:
+        bin_label = f"{bin_label}便"
+    if status in {"", "出勤"} and bin_label in {"1便", "2便", "3便"}:
+        return bin_label
+    return status
+
+
+def resolve_import_member(member_name, members):
+    name = normalize_text(member_name)
+    if not name:
+        return None, "名前が空です"
+    exact = [member for member in members if normalize_text(member["name"]) == name]
+    if len(exact) == 1:
+        return exact[0], ""
+    partial = [member for member in members if name in normalize_text(member["name"])]
+    if len(partial) == 1:
+        return partial[0], ""
+    if len(partial) > 1:
+        return None, f"名前「{name}」に一致するメンバーが複数います"
+    return None, f"メンバー「{name}」が見つかりません"
+
+
+def town_number(town_name):
+    match = re.search(r"(\d+)\s*丁目?", normalize_text(town_name).translate(FULLWIDTH_DIGITS))
+    return match.group(1) if match else ""
+
+
+def match_area_town_ids(area_text, towns):
+    text = normalize_text(area_text)
+    if not text:
+        return []
+    compact_text = compact_area_key(text)
+    matched_ids = []
+
+    def add_town(town_id):
+        if town_id not in matched_ids:
+            matched_ids.append(town_id)
+
+    for town in towns:
+        name_key = compact_area_key(town["name"])
+        district_key = compact_area_key(town["district_name"])
+        full_key = compact_area_key(f"{town['district_name']}{town['name']}")
+        if name_key and (name_key in compact_text or full_key in compact_text):
+            add_town(town["id"])
+        elif district_key and compact_text == district_key:
+            add_town(town["id"])
+
+    normalized = normalize_text(text).translate(FULLWIDTH_DIGITS)
+    for match in re.finditer(r"([^\d,、/／\s・･]+)(\d+(?:[・･,、/／\s]+\d+)*)", normalized):
+        prefix = compact_area_key(match.group(1))
+        numbers = re.findall(r"\d+", match.group(2))
+        for number in numbers:
+            for town in towns:
+                if town_number(town["name"]) != number:
+                    continue
+                district_key = compact_area_key(town["district_name"])
+                name_key = compact_area_key(town["name"])
+                if prefix and (
+                    district_key.startswith(prefix)
+                    or name_key.startswith(prefix)
+                    or prefix in district_key
+                    or prefix in name_key
+                ):
+                    add_town(town["id"])
+
+    tokens = [compact_area_key(token) for token in re.split(r"[、,/／\s]+", text) if compact_area_key(token)]
+    for token in tokens:
+        for town in towns:
+            if token in {compact_area_key(town["name"]), compact_area_key(f"{town['district_name']}{town['name']}")}:
+                add_town(town["id"])
+    return matched_ids
+
+
+def area_preview(town_ids, towns_by_id):
+    labels = []
+    for town_id in town_ids:
+        town = towns_by_id.get(int(town_id))
+        if town:
+            labels.append(f"{town['district_name']} / {town['name']}")
+    return "、".join(labels)
+
+
+def load_csv_shift_rows(data):
+    text = ""
+    for encoding in ("utf-8-sig", "cp932"):
+        try:
+            text = data.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if not text:
+        raise HTTPException(status_code=400, detail="CSVの文字コードを読み取れませんでした")
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="ヘッダー行が見つかりません")
+    reader.fieldnames = [normalize_text(header) for header in reader.fieldnames]
+    rows = []
+    for row in reader:
+        normalized = {normalize_text(key): value for key, value in row.items() if key}
+        if any(normalize_text(value) for value in normalized.values()):
+            rows.append(normalized)
+    return reader.fieldnames, rows
+
+
+def load_excel_shift_rows(data):
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="Excel取り込みにはopenpyxlが必要です") from exc
+    workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    sheet = workbook.active
+    rows_iter = sheet.iter_rows(values_only=True)
+    try:
+        headers = [normalize_text(value) for value in next(rows_iter)]
+    except StopIteration as exc:
+        raise HTTPException(status_code=400, detail="Excelにデータがありません") from exc
+    rows = []
+    for values in rows_iter:
+        row = {headers[index]: values[index] if index < len(values) else "" for index in range(len(headers)) if headers[index]}
+        if any(normalize_text(value) for value in row.values()):
+            rows.append(row)
+    return headers, rows
+
+
+async def load_shift_import_rows(file: UploadFile):
+    filename = file.filename or ""
+    suffix = Path(filename).suffix.lower()
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="ファイルが空です")
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="ファイルサイズは5MB以内にしてください")
+    if suffix == ".csv":
+        headers, rows = load_csv_shift_rows(data)
+    elif suffix in {".xlsx", ".xlsm"}:
+        headers, rows = load_excel_shift_rows(data)
+    elif suffix == ".xls":
+        raise HTTPException(status_code=400, detail="Excelは.xlsx形式で保存してアップロードしてください")
+    else:
+        raise HTTPException(status_code=400, detail="CSVまたはExcel(.xlsx)をアップロードしてください")
+
+    missing = [header for header in SHIFT_IMPORT_HEADERS if header not in headers]
+    if missing:
+        raise HTTPException(status_code=400, detail="不足している列: " + "、".join(missing))
+    if not rows:
+        raise HTTPException(status_code=400, detail="登録できる行がありません")
+    if len(rows) > SHIFT_IMPORT_LIMIT:
+        raise HTTPException(status_code=400, detail=f"一度に取り込めるシフトは{SHIFT_IMPORT_LIMIT}件までです")
+    return rows
+
+
+def current_shift_conflicts(rows):
+    member_ids = sorted({int(row["member_id"]) for row in rows if row.get("member_id")})
+    dates = sorted({row["shift_date"] for row in rows if row.get("shift_date")})
+    if not member_ids or not dates:
+        return set()
+    placeholders = ",".join("?" for _ in member_ids)
+    existing = query_all(
+        f"""SELECT user_id, shift_date FROM shifts
+            WHERE shift_date BETWEEN ? AND ? AND user_id IN ({placeholders})""",
+        [dates[0], dates[-1]] + member_ids,
+    )
+    return {(int(row["user_id"]), row["shift_date"]) for row in existing}
+
+
+def build_shift_import_preview(raw_rows):
+    members = query_all("SELECT id, name FROM users WHERE role='member' AND active=1 AND COALESCE(purged,0)=0 ORDER BY name")
+    towns = active_towns()
+    towns_by_id = {int(town["id"]): town for town in towns}
+    preview_rows = []
+    for index, raw in enumerate(raw_rows, start=2):
+        errors = []
+        shift_date = normalize_import_date(raw.get("日付"))
+        if not shift_date:
+            errors.append("日付が空です")
+        else:
+            try:
+                datetime.strptime(shift_date, "%Y-%m-%d")
+            except ValueError:
+                errors.append("日付はYYYY-MM-DD形式で入力してください")
+
+        member, member_error = resolve_import_member(raw.get("名前"), members)
+        if member_error:
+            errors.append(member_error)
+
+        status = normalize_shift_status(raw.get("出勤区分"), raw.get("便"))
+        if status not in SHIFT_ALLOWED_STATUSES:
+            errors.append("出勤区分は「出勤、1便、2便、3便、休み」のいずれかにしてください")
+
+        area_text = normalize_text(raw.get("配達エリア"))
+        town_ids = []
+        if status != "休み":
+            town_ids = match_area_town_ids(area_text, towns)
+            if not town_ids:
+                errors.append("配達エリアが見つかりません")
+
+        preview_rows.append(
+            {
+                "row_number": index,
+                "shift_date": shift_date,
+                "member_id": member["id"] if member else None,
+                "member_name": normalize_text(raw.get("名前")),
+                "resolved_member_name": member["name"] if member else "",
+                "status": status,
+                "bin_label": normalize_text(raw.get("便")),
+                "area_text": area_text,
+                "town_ids": town_ids,
+                "area_preview": area_preview(town_ids, towns_by_id),
+                "note": normalize_text(raw.get("備考")),
+                "errors": errors,
+                "conflict": False,
+            }
+        )
+
+    valid_rows = [row for row in preview_rows if not row["errors"]]
+    conflicts = current_shift_conflicts(valid_rows)
+    for row in preview_rows:
+        if row["member_id"] and row["shift_date"] and (int(row["member_id"]), row["shift_date"]) in conflicts:
+            row["conflict"] = True
+    payload_rows = [{key: value for key, value in row.items() if key != "errors"} for row in valid_rows]
+    return {
+        "rows": preview_rows,
+        "payload": json.dumps(payload_rows, ensure_ascii=False),
+        "has_errors": any(row["errors"] for row in preview_rows),
+        "has_conflicts": any(row["conflict"] for row in preview_rows),
+    }
+
+
+def get_town_rows_by_ids(town_ids):
+    town_ids = [int(town_id) for town_id in town_ids]
+    if not town_ids:
+        return []
+    placeholders = ",".join("?" for _ in town_ids)
+    return query_all(
+        f"""SELECT t.id, t.name, d.id AS district_id, d.name AS district_name
+            FROM towns t JOIN districts d ON d.id=t.district_id
+            WHERE t.id IN ({placeholders}) AND t.active=1 AND d.active=1
+            ORDER BY d.name, t.name""",
+        town_ids,
+    )
+
+
+def upsert_shift_with_towns(conn, member_id, shift_date, status, town_rows, note=""):
+    first_town = town_rows[0] if town_rows else None
+    area_label = "・".join(f"{town['district_name']} / {town['name']}" for town in town_rows)
+    conn.execute(
+        """INSERT INTO shifts(user_id, shift_date, status, start_time, end_time, note, district_id, town_id, area_label, decided, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(user_id, shift_date) DO UPDATE SET status=excluded.status, start_time=excluded.start_time,
+           end_time=excluded.end_time, note=excluded.note, district_id=excluded.district_id, town_id=excluded.town_id,
+           area_label=excluded.area_label, decided=excluded.decided, updated_at=excluded.updated_at""",
+        (
+            member_id,
+            shift_date,
+            status,
+            "",
+            "",
+            note or "",
+            first_town["district_id"] if first_town else None,
+            first_town["id"] if first_town else None,
+            area_label,
+            1,
+            app_now().isoformat(timespec="seconds"),
+        ),
+    )
+    shift = conn.execute("SELECT id FROM shifts WHERE user_id=? AND shift_date=?", (member_id, shift_date)).fetchone()
+    conn.execute("DELETE FROM shift_towns WHERE shift_id=?", (shift["id"],))
+    if status != "休み":
+        for town in town_rows:
+            conn.execute("INSERT OR IGNORE INTO shift_towns(shift_id, town_id) VALUES (?, ?)", (shift["id"], town["id"]))
+
+
+def upsert_shift_record(member_id, shift_date, status, town_ids, note=""):
+    if status not in SHIFT_ALLOWED_STATUSES:
+        raise HTTPException(status_code=400, detail="出勤区分が正しくありません")
+    if status != "休み" and not town_ids:
+        raise HTTPException(status_code=400, detail="休み以外は町会・配達エリアを1つ以上選択してください")
+    town_rows = get_town_rows_by_ids(town_ids)
+    if status != "休み" and len(town_rows) != len(set(int(town_id) for town_id in town_ids)):
+        raise HTTPException(status_code=400, detail="選択された町会・配達エリアが正しくありません")
+    with db() as conn:
+        upsert_shift_with_towns(conn, member_id, shift_date, status, town_rows, note)
+        conn.commit()
+
+
 def shifts_by_date(shifts):
     grouped = {}
     for shift in shifts:
@@ -878,11 +1255,13 @@ def logout():
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin_dashboard(request: Request, user=Depends(require_admin)):
-    members = query_all("SELECT * FROM users WHERE role = 'member' AND active = 1 ORDER BY id")
     today_s = app_today().isoformat()
+    member_count = query_one("SELECT COUNT(*) AS count FROM users WHERE role='member' AND active=1 AND COALESCE(purged,0)=0")["count"]
+    log_count = query_one("SELECT COUNT(*) AS count FROM work_logs WHERE work_date=?", (today_s,))["count"]
+    delivery_count = query_one("SELECT COUNT(*) AS count FROM deliveries WHERE work_date=?", (today_s,))["count"]
     logs = query_all(
         """SELECT w.*, u.name FROM work_logs w JOIN users u ON u.id = w.user_id
-           WHERE w.work_date = ? ORDER BY w.logged_at DESC""",
+           WHERE w.work_date = ? ORDER BY w.logged_at DESC LIMIT 30""",
         (today_s,),
     )
     issues = query_all(
@@ -890,11 +1269,25 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
            ORDER BY v.created_at DESC LIMIT 5"""
     )
     deliveries = query_all(
-        """SELECT d.*, u.name FROM deliveries d JOIN users u ON u.id = d.user_id
-           WHERE d.work_date = ? ORDER BY u.name""",
+        """SELECT d.*, u.name, COALESCE(s.file_path, d.inspection_sheet_path) AS slip_path
+           FROM deliveries d
+           JOIN users u ON u.id = d.user_id
+           LEFT JOIN inspection_slips s ON s.delivery_id=d.id
+           WHERE d.work_date = ? ORDER BY u.name LIMIT 100""",
         (today_s,),
     )
-    return render(request, "admin_dashboard.html", {"members": members, "logs": logs, "issues": issues, "deliveries": deliveries})
+    return render(
+        request,
+        "admin_dashboard.html",
+        {
+            "member_count": member_count,
+            "log_count": log_count,
+            "delivery_count": delivery_count,
+            "logs": logs,
+            "issues": issues,
+            "deliveries": deliveries,
+        },
+    )
 
 
 @app.get("/admin/members", response_class=HTMLResponse)
@@ -1106,7 +1499,7 @@ def delivery_page(request: Request, day: Optional[str] = None, user=Depends(requ
                FROM deliveries d
                JOIN users u ON u.id=d.user_id
                LEFT JOIN inspection_slips s ON s.delivery_id=d.id
-               WHERE d.work_date=? ORDER BY u.name""",
+               WHERE d.work_date=? ORDER BY u.name LIMIT 300""",
             (target,),
         )
         return render(request, "admin_deliveries.html", {"rows": rows, "target": target})
@@ -1218,10 +1611,16 @@ def inspection_sheets_page(request: Request, day: Optional[str] = None, member_i
             f"""SELECT s.*, u.name FROM inspection_sheets s
                 JOIN users u ON u.id=s.user_id
                 WHERE s.sheet_date=? {member_filter}
-                ORDER BY u.name""",
+                ORDER BY u.name LIMIT 200""",
             params,
         )
-        submitted_ids = {sheet["user_id"] for sheet in sheets}
+        submitted_rows = query_all(
+            f"""SELECT s.user_id FROM inspection_sheets s
+                JOIN users u ON u.id=s.user_id
+                WHERE s.sheet_date=? {member_filter}""",
+            params,
+        )
+        submitted_ids = {sheet["user_id"] for sheet in submitted_rows}
         missing_members = [member for member in members if member["id"] not in submitted_ids and (not member_id or member["id"] == member_id)]
         return render(request, "inspection_admin.html", {"target": target, "members": members, "member_id": member_id, "sheets": sheets, "missing_members": missing_members})
     sheets = query_all("SELECT * FROM inspection_sheets WHERE user_id=? ORDER BY sheet_date DESC LIMIT 30", (user["id"],))
@@ -1510,7 +1909,7 @@ def member_shifts_link(user=Depends(require_user)):
 
 
 @app.get("/shifts", response_class=HTMLResponse)
-def shifts_page(request: Request, ym: Optional[str] = None, user=Depends(require_user)):
+def shifts_page(request: Request, ym: Optional[str] = None, message: str = "", user=Depends(require_user)):
     start, end = month_bounds(ym)
     if user["role"] == "admin":
         members = query_all("SELECT id, name FROM users WHERE role='member' AND active=1 ORDER BY name")
@@ -1536,6 +1935,7 @@ def shifts_page(request: Request, ym: Optional[str] = None, user=Depends(require
                 "days": calendar_days_for_month(start),
                 "towns": active_towns(),
                 "shifts_by_date": shifts_by_date(shifts),
+                "message": message,
             },
         )
     shifts = query_all(
@@ -1551,6 +1951,105 @@ def shifts_page(request: Request, ym: Optional[str] = None, user=Depends(require
     return render(request, "member_shifts.html", {"shifts": shifts, "ym": start.strftime("%Y-%m"), "days": calendar_days_for_month(start), "shifts_by_date": shifts_by_date(shifts)})
 
 
+@app.get("/admin/shifts/import-template")
+def download_shift_import_template(user=Depends(require_admin)):
+    rows = [
+        SHIFT_IMPORT_HEADERS,
+        ["2026-05-05", "笹本", "出勤", "高松1・2・3", "1便", ""],
+        ["2026-05-05", "関口", "出勤", "高松4・5", "2便", ""],
+    ]
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerows(rows)
+    content = "\ufeff" + buffer.getvalue()
+    headers = {"Content-Disposition": 'attachment; filename="shift_import_template.csv"'}
+    return Response(content=content, media_type="text/csv; charset=utf-8", headers=headers)
+
+
+@app.post("/admin/shifts/import/preview", response_class=HTMLResponse)
+async def preview_shift_import(request: Request, import_file: UploadFile = File(...), user=Depends(require_admin)):
+    try:
+        raw_rows = await load_shift_import_rows(import_file)
+        preview = build_shift_import_preview(raw_rows)
+    except HTTPException as exc:
+        return render(
+            request,
+            "shift_import_confirm.html",
+            {
+                "rows": [],
+                "payload": "[]",
+                "has_errors": True,
+                "has_conflicts": False,
+                "error": exc.detail,
+                "filename": import_file.filename or "",
+            },
+        )
+    return render(
+        request,
+        "shift_import_confirm.html",
+        {
+            **preview,
+            "error": "",
+            "filename": import_file.filename or "",
+        },
+    )
+
+
+@app.post("/admin/shifts/import/commit", response_class=HTMLResponse)
+def commit_shift_import(request: Request, payload: str = Form(...), overwrite_conflicts: Optional[str] = Form(None), user=Depends(require_admin)):
+    try:
+        rows = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="取り込み内容を読み取れませんでした") from exc
+    if not isinstance(rows, list) or not rows:
+        return render(
+            request,
+            "shift_import_confirm.html",
+            {
+                "rows": [],
+                "payload": "[]",
+                "has_errors": True,
+                "has_conflicts": False,
+                "error": "登録できる行がありません",
+                "filename": "",
+            },
+        )
+
+    conflicts = current_shift_conflicts(rows)
+    for row in rows:
+        row["errors"] = []
+        row["conflict"] = bool(row.get("member_id") and row.get("shift_date") and (int(row["member_id"]), row["shift_date"]) in conflicts)
+    if conflicts and not overwrite_conflicts:
+        return render(
+            request,
+            "shift_import_confirm.html",
+            {
+                "rows": rows,
+                "payload": json.dumps([{key: value for key, value in row.items() if key != "errors"} for row in rows], ensure_ascii=False),
+                "has_errors": False,
+                "has_conflicts": True,
+                "error": "既存シフトがあります。上書きする場合はチェックを入れて確定してください。",
+                "filename": "",
+            },
+        )
+
+    towns_by_id = {int(town["id"]): town for town in active_towns()}
+    with db() as conn:
+        for row in rows:
+            status = row.get("status", "")
+            if status not in SHIFT_ALLOWED_STATUSES:
+                raise HTTPException(status_code=400, detail="出勤区分が正しくありません")
+            town_ids = [int(town_id) for town_id in row.get("town_ids", [])]
+            town_rows = [towns_by_id[town_id] for town_id in town_ids if town_id in towns_by_id]
+            if status != "休み" and len(town_rows) != len(set(town_ids)):
+                raise HTTPException(status_code=400, detail="配達エリアが正しくありません")
+            upsert_shift_with_towns(conn, int(row["member_id"]), row["shift_date"], status, town_rows, row.get("note", ""))
+        conn.commit()
+    ym = rows[0]["shift_date"][:7] if rows and rows[0].get("shift_date") else app_today().strftime("%Y-%m")
+    message = quote(f"{len(rows)}件のシフトを取り込みました")
+    return RedirectResponse(f"/shifts?ym={ym}&message={message}", status_code=303)
+
+
 @app.post("/shifts")
 def save_shift(
     member_id: int = Form(...),
@@ -1559,52 +2058,7 @@ def save_shift(
     town_ids: List[int] = Form(default=[]),
     user=Depends(require_admin),
 ):
-    allowed = {"出勤", "1便", "2便", "3便", "休み"}
-    if status not in allowed:
-        raise HTTPException(status_code=400, detail="出勤区分が正しくありません")
-    if status != "休み" and not town_ids:
-        raise HTTPException(status_code=400, detail="休み以外は町会・配達エリアを1つ以上選択してください")
-    town_rows = []
-    if town_ids:
-        placeholders = ",".join("?" for _ in town_ids)
-        town_rows = query_all(
-            f"""SELECT t.id, t.name, d.id AS district_id, d.name AS district_name
-                FROM towns t JOIN districts d ON d.id=t.district_id
-                WHERE t.id IN ({placeholders}) AND t.active=1 AND d.active=1
-                ORDER BY d.name, t.name""",
-            town_ids,
-        )
-    if status != "休み" and len(town_rows) != len(set(town_ids)):
-        raise HTTPException(status_code=400, detail="選択された町会・配達エリアが正しくありません")
-    first_town = town_rows[0] if town_rows else None
-    area_label = "・".join(f"{town['district_name']} / {town['name']}" for town in town_rows)
-    with db() as conn:
-        conn.execute(
-            """INSERT INTO shifts(user_id, shift_date, status, start_time, end_time, note, district_id, town_id, area_label, decided, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(user_id, shift_date) DO UPDATE SET status=excluded.status, start_time=excluded.start_time,
-               end_time=excluded.end_time, note=excluded.note, district_id=excluded.district_id, town_id=excluded.town_id,
-               area_label=excluded.area_label, decided=excluded.decided, updated_at=excluded.updated_at""",
-            (
-                member_id,
-                shift_date,
-                status,
-                "",
-                "",
-                area_label,
-                first_town["district_id"] if first_town else None,
-                first_town["id"] if first_town else None,
-                area_label,
-                1,
-                datetime.now().isoformat(timespec="seconds"),
-            ),
-        )
-        shift = conn.execute("SELECT id FROM shifts WHERE user_id=? AND shift_date=?", (member_id, shift_date)).fetchone()
-        conn.execute("DELETE FROM shift_towns WHERE shift_id=?", (shift["id"],))
-        if status != "休み":
-            for town in town_rows:
-                conn.execute("INSERT OR IGNORE INTO shift_towns(shift_id, town_id) VALUES (?, ?)", (shift["id"], town["id"]))
-        conn.commit()
+    upsert_shift_record(member_id, shift_date, status, town_ids)
     return RedirectResponse("/shifts", status_code=303)
 
 

@@ -5,6 +5,21 @@
   <label>月<input type="month" name="ym" value="{{ ym }}"></label>
   <button>表示</button>
 </form>
+{% if message %}<p class="success">{{ message }}</p>{% endif %}
+
+<section class="panel shift-import">
+  <h2>シフト一括インポート</h2>
+  <div class="actions import-actions">
+    <a class="button" href="/admin/shifts/import-template">インポート用ファイルをダウンロード</a>
+  </div>
+  <form method="post" action="/admin/shifts/import/preview" enctype="multipart/form-data" class="formgrid">
+    <label>CSVまたはExcel(.xlsx)
+      <input type="file" name="import_file" accept=".csv,.xlsx,.xlsm" required>
+    </label>
+    <button class="primary">確認画面へ</button>
+  </form>
+  <p class="hint">列は「日付、名前、出勤区分、配達エリア、便、備考」です。登録前に確認画面を表示します。</p>
+</section>
 
 <section class="panel">
   <h2>日付をクリックして登録</h2>
