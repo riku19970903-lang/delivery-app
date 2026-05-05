@@ -4,6 +4,45 @@
 {% if error %}<p class="alert">{{ error }}</p>{% endif %}
 {% if message %}<p class="success">{{ message }}</p>{% endif %}
 
+{% if can_manage_companies %}
+<section class="panel settings-panel">
+  <h2>会社管理</h2>
+  <form method="post" action="/admin/settings/company" class="formgrid" onsubmit="return confirm('会社と管理者アカウントを追加します。保存しますか？');">
+    <input type="hidden" name="company_id" value="">
+    <label>会社名<input name="name" required placeholder="例：○○配送"></label>
+    <label>会社コード<input name="code" required placeholder="例：MARU-001"></label>
+    <label>管理者ログインID<input name="admin_username" required autocomplete="off"></label>
+    <label>管理者パスワード<input name="admin_password" type="password" required autocomplete="new-password"></label>
+    <label>状態
+      <select name="active">
+        <option value="1">利用中</option>
+        <option value="0">停止中</option>
+      </select>
+    </label>
+    <button class="primary">会社を追加</button>
+  </form>
+
+  {% for c in companies %}
+  <form method="post" action="/admin/settings/company" class="formgrid settings-row" onsubmit="return confirm('{{ c.name }} の会社情報を変更します。保存しますか？');">
+    <input type="hidden" name="company_id" value="{{ c.id }}">
+    <label>会社名<input name="name" value="{{ c.name }}" required></label>
+    <label>会社コード<input name="code" value="{{ c.code or '' }}" required></label>
+    <label>管理者ログインID<input name="admin_username" value="{{ c.admin_username or '' }}" required autocomplete="off"></label>
+    <label>管理者パスワード<input name="admin_password" type="password" placeholder="変更時だけ入力" autocomplete="new-password"></label>
+    <label>状態
+      <select name="active">
+        <option value="1" {{ 'selected' if c.active else '' }}>利用中</option>
+        <option value="0" {{ '' if c.active else 'selected' }}>停止中</option>
+      </select>
+    </label>
+    <button class="primary">保存</button>
+  </form>
+  {% else %}
+  <p class="hint">会社が未登録です。</p>
+  {% endfor %}
+</section>
+{% endif %}
+
 <section class="panel settings-panel">
   <h2>管理者アカウント</h2>
   <form method="post" action="/admin/settings/account" class="formgrid" onsubmit="return confirm('管理者のログイン情報を変更します。保存しますか？');">

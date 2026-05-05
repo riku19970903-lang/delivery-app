@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>SPARKLE DRIVE 管理</h1>
+<h1>{{ company_name or "SPARKLE DRIVE" }} 管理</h1>
 <div class="grid stats">
   <div class="tile"><span>登録メンバー</span><strong>{{ member_count }}名</strong></div>
   <div class="tile"><span>本日の点呼記録</span><strong>{{ log_count }}件</strong></div>

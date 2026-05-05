@@ -184,7 +184,7 @@ def _append_sql_clause(sql: str, clause: str) -> str:
 
 def _needs_returning_id(sql: str) -> bool:
     return bool(
-        re.match(r"^\s*INSERT\s+INTO\s+(users|vehicle_issues)\b", sql, flags=re.IGNORECASE)
+        re.match(r"^\s*INSERT\s+INTO\s+(users|vehicle_issues|companies)\b", sql, flags=re.IGNORECASE)
         and "RETURNING" not in sql.upper()
         and "ON CONFLICT" not in sql.upper()
     )
@@ -356,6 +356,14 @@ def company_id_for(user):
     return int(row_value(user, "company_id", 1) or 1)
 
 
+def company_name_for(user):
+    return row_value(user, "company_name", "") or APP_NAME
+
+
+def can_manage_companies(user):
+    return row_value(user, "role") == "admin" and company_id_for(user) == 1
+
+
 def execute(sql: str, params=()):
     ensure_db_initialized()
     with db() as conn:
@@ -487,6 +495,7 @@ def _init_db_schema():
             CREATE TABLE IF NOT EXISTS companies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
+                code TEXT DEFAULT '',
                 active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
             );
@@ -674,6 +683,9 @@ def _init_db_schema():
             );
             """
         )
+        ensure_column(conn, "companies", "code", "TEXT DEFAULT ''")
+        ensure_column(conn, "companies", "active", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "companies", "created_at", "TEXT DEFAULT ''")
         ensure_column(conn, "users", "phone", "TEXT DEFAULT ''")
         ensure_column(conn, "users", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "users", "vehicle", "TEXT DEFAULT ''")
@@ -841,7 +853,15 @@ def current_user(request: Request):
         user_id = serializer.loads(raw)
     except BadSignature:
         return None
-    user = query_one("SELECT * FROM users WHERE id = ? AND active = 1", (user_id,))
+    user = query_one(
+        """SELECT u.*, c.name AS company_name, c.code AS company_code, c.active AS company_active
+           FROM users u
+           LEFT JOIN companies c ON c.id=u.company_id
+           WHERE u.id = ? AND u.active = 1""",
+        (user_id,),
+    )
+    if user and row_value(user, "company_active", 1) == 0:
+        user = None
     request.state.user = user
     return user
 
@@ -877,7 +897,15 @@ def inspection_file(request: Request, path: str = "", user=Depends(require_user)
 
 def render(request: Request, name: str, context: dict):
     user = current_user(request)
-    context.update({"request": request, "user": user, "today": app_today().isoformat(), "app_name": APP_NAME})
+    context.update(
+        {
+            "request": request,
+            "user": user,
+            "today": app_today().isoformat(),
+            "app_name": APP_NAME,
+            "company_name": company_name_for(user) if user else APP_NAME,
+        }
+    )
     return templates.TemplateResponse(name, context)
 
 
@@ -1336,15 +1364,20 @@ def calc_reward_gross(row, rates):
     )
 
 
-def monthly_reward_summary(user_id: int, target_month: date):
+def monthly_reward_summary(user_id: int, target_month: date, company_id: Optional[int] = None):
     start = target_month.replace(day=1)
     if start.month == 12:
         next_month = start.replace(year=start.year + 1, month=1)
     else:
         next_month = start.replace(month=start.month + 1)
     end = next_month - timedelta(days=1)
+    company_filter = ""
+    params = [user_id, start.isoformat(), end.isoformat()]
+    if company_id is not None:
+        company_filter = " AND company_id=?"
+        params.append(company_id)
     summary = query_one(
-        """SELECT
+        f"""SELECT
               COALESCE(SUM(completed), 0) AS completed_total,
               COALESCE(SUM(transfer), 0) AS transfer_total,
               COALESCE(SUM(night), 0) AS night_total,
@@ -1352,10 +1385,13 @@ def monthly_reward_summary(user_id: int, target_month: date):
               COALESCE(SUM(large), 0) AS large_total,
               COUNT(*) AS delivery_days
            FROM deliveries
-           WHERE user_id=? AND work_date BETWEEN ? AND ?""",
-        (user_id, start.isoformat(), end.isoformat()),
+           WHERE user_id=? AND work_date BETWEEN ? AND ?{company_filter}""",
+        params,
     )
-    rates = query_one("SELECT * FROM rates WHERE user_id=?", (user_id,))
+    if company_id is not None:
+        rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (user_id, company_id))
+    else:
+        rates = query_one("SELECT * FROM rates WHERE user_id=?", (user_id,))
     if not rates:
         return {"gross_total": 0, "net_total": 0, "vehicle_deduction": 0, "completed_total": 0, "rows": []}
     gross_total = (
@@ -1381,15 +1417,21 @@ def monthly_reward_summary(user_id: int, target_month: date):
     }
 
 
-def upcoming_member_shifts(user_id: int, today_s: str):
+def upcoming_member_shifts(user_id: int, today_s: str, company_id: Optional[int] = None):
+    company_filter = ""
+    params = [user_id, today_s]
+    if company_id is not None:
+        company_filter = " AND s.company_id=?"
+        params.append(company_id)
     rows = query_all(
-        """SELECT s.*, d.name AS district_name, t.name AS town_name
+        f"""SELECT s.*, d.name AS district_name, t.name AS town_name
            FROM shifts s
            LEFT JOIN districts d ON d.id=s.district_id
            LEFT JOIN towns t ON t.id=s.town_id
            WHERE s.user_id=? AND s.shift_date>=? AND s.decided=1
+           {company_filter}
            ORDER BY s.shift_date LIMIT 3""",
-        (user_id, today_s),
+        params,
     )
     return attach_shift_areas(rows)
 
@@ -1531,9 +1573,17 @@ def login_page(request: Request):
 
 @app.post("/login")
 def login(request: Request, username: str = Form(...), password: str = Form(...)):
-    user = query_one("SELECT * FROM users WHERE username = ? AND active = 1", (username,))
+    user = query_one(
+        """SELECT u.*, c.name AS company_name, c.code AS company_code, c.active AS company_active
+           FROM users u
+           LEFT JOIN companies c ON c.id=u.company_id
+           WHERE u.username = ? AND u.active = 1""",
+        (username,),
+    )
     if not user or user["password_hash"] != hash_password(password):
         return render(request, "login.html", {"error": "IDまたはパスワードが違います"})
+    if row_value(user, "company_active", 1) == 0:
+        return render(request, "login.html", {"error": "この会社アカウントは停止中です"})
     res = RedirectResponse("/", status_code=303)
     res.set_cookie("session", serializer.dumps(user["id"]), httponly=True, samesite="lax")
     return res
@@ -1683,7 +1733,28 @@ def admin_settings_page(request: Request, message: str = "", error: str = "", us
            LIMIT 200""",
         (company_id,),
     )
-    return render(request, "admin_settings.html", {"members": members, "message": message, "error": error})
+    companies = []
+    if can_manage_companies(user):
+        companies = query_all(
+            """SELECT c.*,
+                      (SELECT username FROM users au
+                       WHERE au.company_id=c.id AND au.role='admin' AND au.active=1
+                       ORDER BY au.id LIMIT 1) AS admin_username
+               FROM companies c
+               ORDER BY c.id
+               LIMIT 200"""
+        )
+    return render(
+        request,
+        "admin_settings.html",
+        {
+            "members": members,
+            "companies": companies,
+            "can_manage_companies": can_manage_companies(user),
+            "message": message,
+            "error": error,
+        },
+    )
 
 
 @app.post("/admin/settings/account")
@@ -1732,6 +1803,88 @@ def update_member_login(
     return RedirectResponse("/admin/settings?message=" + quote("メンバーのログイン情報を更新しました"), status_code=303)
 
 
+@app.post("/admin/settings/company")
+def save_company(
+    company_id: str = Form(""),
+    name: str = Form(...),
+    code: str = Form(...),
+    admin_username: str = Form(...),
+    admin_password: str = Form(""),
+    active: str = Form("1"),
+    user=Depends(require_admin),
+):
+    if not can_manage_companies(user):
+        raise HTTPException(status_code=403, detail="会社管理の権限がありません")
+
+    cid = int(company_id) if company_id.strip().isdigit() else 0
+    name = name.strip()
+    code = code.strip()
+    admin_username = admin_username.strip()
+    active_int = 1 if active == "1" else 0
+    admin_name = f"{name} 管理者" if name else "管理者"
+
+    if not name or not code or not admin_username:
+        return RedirectResponse("/admin/settings?error=" + quote("会社名、会社コード、管理者ログインIDを入力してください"), status_code=303)
+    if cid == company_id_for(user) and active_int == 0:
+        return RedirectResponse("/admin/settings?error=" + quote("ログイン中の会社は停止できません"), status_code=303)
+
+    admin = None
+    if cid:
+        existing_company = query_one("SELECT id FROM companies WHERE id=?", (cid,))
+        if not existing_company:
+            return RedirectResponse("/admin/settings?error=" + quote("会社が見つかりません"), status_code=303)
+        admin = query_one(
+            "SELECT id FROM users WHERE company_id=? AND role='admin' ORDER BY id LIMIT 1",
+            (cid,),
+        )
+
+    if not cid and not admin_password:
+        return RedirectResponse("/admin/settings?error=" + quote("新しい会社の管理者パスワードを入力してください"), status_code=303)
+
+    duplicate_code = query_one("SELECT id FROM companies WHERE code=? AND id<>?", (code, cid or 0))
+    if duplicate_code:
+        return RedirectResponse("/admin/settings?error=" + quote("同じ会社コードが既に使われています"), status_code=303)
+
+    ignore_admin_id = admin["id"] if admin else 0
+    duplicate_username = query_one("SELECT id FROM users WHERE username=? AND id<>?", (admin_username, ignore_admin_id))
+    if duplicate_username:
+        return RedirectResponse("/admin/settings?error=" + quote("同じログインIDが既に使われています"), status_code=303)
+
+    now = app_now().isoformat(timespec="seconds")
+    if cid:
+        execute("UPDATE companies SET name=?, code=?, active=? WHERE id=?", (name, code, active_int, cid))
+        if admin:
+            if admin_password:
+                execute(
+                    "UPDATE users SET name=?, username=?, password_hash=?, active=1 WHERE id=? AND role='admin' AND company_id=?",
+                    (admin_name, admin_username, hash_password(admin_password), admin["id"], cid),
+                )
+            else:
+                execute(
+                    "UPDATE users SET name=?, username=?, active=1 WHERE id=? AND role='admin' AND company_id=?",
+                    (admin_name, admin_username, admin["id"], cid),
+                )
+        else:
+            if not admin_password:
+                return RedirectResponse("/admin/settings?error=" + quote("管理者が未登録です。パスワードを入力してください"), status_code=303)
+            execute(
+                "INSERT INTO users(company_id, name, username, password_hash, role, phone, vehicle, active, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (cid, admin_name, admin_username, hash_password(admin_password), "admin", "", "", 1, now),
+            )
+        return RedirectResponse("/admin/settings?message=" + quote("会社情報を更新しました"), status_code=303)
+
+    cur = execute(
+        "INSERT INTO companies(name, code, active, created_at) VALUES (?,?,?,?)",
+        (name, code, active_int, now),
+    )
+    new_company_id = cur.lastrowid
+    execute(
+        "INSERT INTO users(company_id, name, username, password_hash, role, phone, vehicle, active, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (new_company_id, admin_name, admin_username, hash_password(admin_password), "admin", "", "", 1, now),
+    )
+    return RedirectResponse("/admin/settings?message=" + quote("会社と管理者を追加しました"), status_code=303)
+
+
 @app.get("/settings", response_class=HTMLResponse)
 def member_settings_page(request: Request, message: str = "", error: str = "", user=Depends(require_user)):
     return render(request, "member_settings.html", {"message": message, "error": error})
@@ -1758,9 +1911,9 @@ def update_own_password(
 def rates_page(request: Request, user=Depends(require_admin)):
     company_id = company_id_for(user)
     rows = query_all(
-        """SELECT u.id, u.name, r.* FROM users u LEFT JOIN rates r ON r.user_id = u.id
+        """SELECT u.id, u.name, r.* FROM users u LEFT JOIN rates r ON r.user_id = u.id AND r.company_id=?
            WHERE u.role='member' AND u.active=1 AND u.company_id=? ORDER BY u.id LIMIT 200""",
-        (company_id,),
+        (company_id, company_id),
     )
     return render(request, "rates.html", {"rows": rows})
 
@@ -1815,12 +1968,13 @@ def member_home(request: Request, user=Depends(require_user)):
     if user["role"] == "admin":
         return RedirectResponse("/admin", status_code=303)
     today_s = app_today().isoformat()
-    delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND work_date=?", (user["id"], today_s))
-    rates = query_one("SELECT * FROM rates WHERE user_id=?", (user["id"],))
+    company_id = company_id_for(user)
+    delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user["id"], company_id, today_s))
+    rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (user["id"], company_id))
     vehicle_rates = query_one("SELECT * FROM vehicle_rates WHERE id=1")
     reward = calc_reward(delivery, rates, vehicle_rates) if delivery else 0
-    month_summary = monthly_reward_summary(user["id"], app_today())
-    shifts = upcoming_member_shifts(user["id"], today_s)
+    month_summary = monthly_reward_summary(user["id"], app_today(), company_id)
+    shifts = upcoming_member_shifts(user["id"], today_s, company_id)
     today_shift = shifts[0] if shifts and shifts[0]["shift_date"] == today_s else None
     next_shifts = [item for item in shifts if item["shift_date"] != today_s][:2]
     comment = auto_comment(delivery, reward, bool(today_shift))
@@ -1843,7 +1997,10 @@ def member_home(request: Request, user=Depends(require_user)):
 def work_log_page(request: Request, type: str = "start", user=Depends(require_user)):
     log_type = type if type in {"start", "end"} else "start"
     now = app_now()
-    logs = query_all("SELECT * FROM work_logs WHERE user_id=? ORDER BY logged_at DESC LIMIT 20", (user["id"],))
+    logs = query_all(
+        "SELECT * FROM work_logs WHERE user_id=? AND company_id=? ORDER BY logged_at DESC LIMIT 20",
+        (user["id"], company_id_for(user)),
+    )
     return render(
         request,
         "work_log.html",
@@ -1896,10 +2053,11 @@ def delivery_page(request: Request, day: Optional[str] = None, user=Depends(requ
         )
         rows = attach_image_info(rows, "slip_path")
         return render(request, "admin_deliveries.html", {"rows": rows, "target": target})
-    delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND work_date=?", (user["id"], target))
-    slip = query_one("SELECT * FROM inspection_slips WHERE user_id=? AND slip_date=?", (user["id"], target))
-    sheet = query_one("SELECT * FROM inspection_sheets WHERE user_id=? AND sheet_date=?", (user["id"], target))
-    rates = query_one("SELECT * FROM rates WHERE user_id=?", (user["id"],))
+    company_id = company_id_for(user)
+    delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user["id"], company_id, target))
+    slip = query_one("SELECT * FROM inspection_slips WHERE user_id=? AND company_id=? AND slip_date=?", (user["id"], company_id, target))
+    sheet = query_one("SELECT * FROM inspection_sheets WHERE user_id=? AND company_id=? AND sheet_date=?", (user["id"], company_id, target))
+    rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (user["id"], company_id))
     vehicle_rates = query_one("SELECT * FROM vehicle_rates WHERE id=1")
     reward = calc_reward(delivery, rates, vehicle_rates) if delivery else 0
     inspection_image_path = ""
@@ -1953,7 +2111,7 @@ async def save_delivery(
                memo=excluded.memo, updated_at=excluded.updated_at, company_id=excluded.company_id""",
             (company_id, user["id"], work_date, completed, transfer, night, pickup, large, vehicle_rental, memo, "", now, now),
         )
-        delivery = conn.execute("SELECT id FROM deliveries WHERE user_id=? AND work_date=?", (user["id"], work_date)).fetchone()
+        delivery = conn.execute("SELECT id FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user["id"], company_id, work_date)).fetchone()
         conn.commit()
     if inspection_image and inspection_image.filename:
         if not inspection_image.content_type or not inspection_image.content_type.startswith("image/"):
@@ -1978,7 +2136,7 @@ async def save_delivery(
                        content_type=excluded.content_type, uploaded_at=excluded.uploaded_at""",
                     (company_id, user["id"], delivery["id"], work_date, public_path, inspection_image.filename or "", inspection_image.content_type or "", now),
                 )
-                conn.execute("UPDATE deliveries SET inspection_sheet_path=?, updated_at=? WHERE id=?", (public_path, now, delivery["id"]))
+                conn.execute("UPDATE deliveries SET inspection_sheet_path=?, updated_at=? WHERE id=? AND company_id=?", (public_path, now, delivery["id"], company_id))
                 conn.commit()
     return RedirectResponse(f"/deliveries?day={work_date}", status_code=303)
 
@@ -2011,7 +2169,12 @@ def inspection_sheets_page(request: Request, day: Optional[str] = None, member_i
         submitted_ids = {sheet["user_id"] for sheet in submitted_rows}
         missing_members = [member for member in members if member["id"] not in submitted_ids and (not member_id or member["id"] == member_id)]
         return render(request, "inspection_admin.html", {"target": target, "members": members, "member_id": member_id, "sheets": sheets, "missing_members": missing_members})
-    sheets = attach_image_info(query_all("SELECT * FROM inspection_sheets WHERE user_id=? ORDER BY sheet_date DESC LIMIT 30", (user["id"],)))
+    sheets = attach_image_info(
+        query_all(
+            "SELECT * FROM inspection_sheets WHERE user_id=? AND company_id=? ORDER BY sheet_date DESC LIMIT 30",
+            (user["id"], company_id_for(user)),
+        )
+    )
     return render(request, "inspection_member.html", {"target": target, "sheets": sheets})
 
 
@@ -2068,7 +2231,7 @@ async def upload_inspection_sheet(sheet_date: str = Form(...), image: UploadFile
                 now,
             ),
         )
-        sheet = conn.execute("SELECT id FROM inspection_sheets WHERE user_id=? AND sheet_date=?", (user["id"], sheet_date)).fetchone()
+        sheet = conn.execute("SELECT id FROM inspection_sheets WHERE user_id=? AND company_id=? AND sheet_date=?", (user["id"], company_id, sheet_date)).fetchone()
         conn.commit()
     return RedirectResponse(f"/inspection-sheets/{sheet['id']}/correct", status_code=303)
 
@@ -2098,7 +2261,7 @@ def inspection_sheet_correct_page(request: Request, sheet_id: int, user=Depends(
     sheet = with_image_info(inspection_sheet_for_user(sheet_id, user))
     extracted_fields = extract_inspection_fields(sheet.get("ocr_text", "") or "", fallback_date=sheet.get("delivery_date") or sheet["sheet_date"])
     target_date = sheet.get("delivery_date") or extracted_fields["work_date"] or sheet["sheet_date"]
-    delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND work_date=?", (sheet["user_id"], target_date))
+    delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (sheet["user_id"], row_value(sheet, "company_id", company_id_for(user)), target_date))
     ocr_completed = sheet.get("ocr_completed") or extracted_fields["completed"]
     ocr_pickup = sheet.get("ocr_pickup") or extracted_fields["pickup"]
     counts = {
@@ -2142,7 +2305,7 @@ def apply_inspection_sheet_counts(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="日付はYYYY-MM-DD形式で入力してください") from exc
     now = app_now().isoformat(timespec="seconds")
-    existing = query_one("SELECT * FROM deliveries WHERE user_id=? AND work_date=?", (sheet["user_id"], target_date))
+    existing = query_one("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (sheet["user_id"], company_id, target_date))
     memo = existing["memo"] if existing and existing["memo"] else "点検表から反映"
     vehicle_rental = existing["vehicle_rental"] if existing else "none"
     values = {
@@ -2178,7 +2341,7 @@ def apply_inspection_sheet_counts(
         conn.execute(
             """UPDATE inspection_sheets
                SET delivery_date=?, ocr_status=?, ocr_completed=?, ocr_pickup=?, ocr_acceptance=?
-               WHERE id=?""",
+               WHERE id=? AND company_id=?""",
             (
                 target_date,
                 "反映済み",
@@ -2186,6 +2349,7 @@ def apply_inspection_sheet_counts(
                 values["pickup"],
                 values["pickup"],
                 sheet_id,
+                company_id,
             ),
         )
         conn.commit()
@@ -2197,16 +2361,19 @@ def rewards_page(request: Request, ym: Optional[str] = None, member_id: Optional
     start, end = month_bounds(ym)
     viewing_user_id = user["id"]
     members = []
+    company_id = company_id_for(user)
     if user["role"] == "admin":
-        company_id = company_id_for(user)
         members = query_all("SELECT id, name FROM users WHERE role='member' AND active=1 AND company_id=? ORDER BY name LIMIT 200", (company_id,))
         if member_id:
             selected = query_one("SELECT id FROM users WHERE id=? AND role='member' AND company_id=?", (member_id, company_id))
             viewing_user_id = selected["id"] if selected else (members[0]["id"] if members else user["id"])
         elif members:
             viewing_user_id = members[0]["id"]
-    rows = query_all("SELECT * FROM deliveries WHERE user_id=? AND work_date BETWEEN ? AND ? ORDER BY work_date", (viewing_user_id, start.isoformat(), end.isoformat()))
-    rates = query_one("SELECT * FROM rates WHERE user_id=?", (viewing_user_id,))
+    rows = query_all(
+        "SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date BETWEEN ? AND ? ORDER BY work_date",
+        (viewing_user_id, company_id, start.isoformat(), end.isoformat()),
+    )
+    rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (viewing_user_id, company_id))
     vehicle_rates = query_one("SELECT * FROM vehicle_rates WHERE id=1")
     daily = []
     total = 0
