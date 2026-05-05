@@ -364,6 +364,26 @@ def can_manage_companies(user):
     return row_value(user, "role") == "admin" and company_id_for(user) == 1
 
 
+def deleted_username_for(user_id):
+    return f"deleted_member_{user_id}_{app_now().strftime('%Y%m%d%H%M%S%f')}"
+
+
+def release_purged_username(username: str):
+    username = (username or "").strip()
+    if not username:
+        return
+    rows = query_all("SELECT id FROM users WHERE username=? AND COALESCE(purged,0)=1", (username,))
+    for row in rows:
+        released_username = deleted_username_for(row["id"])
+        now = app_now().isoformat(timespec="seconds")
+        execute(
+            """UPDATE users
+               SET username=?, password_hash=?, deleted_at=COALESCE(NULLIF(deleted_at,''), ?)
+               WHERE id=? AND username=? AND COALESCE(purged,0)=1""",
+            (released_username, hash_password(released_username), now, row["id"], username),
+        )
+
+
 def execute(sql: str, params=()):
     ensure_db_initialized()
     with db() as conn:
@@ -1660,31 +1680,29 @@ def save_member(
 ):
     company_id = company_id_for(user)
     now = app_now().isoformat(timespec="seconds")
+    username = username.strip()
+    if not username:
+        return RedirectResponse(f"/admin/members?error={quote('ログインIDを入力してください')}", status_code=303)
+    release_purged_username(username)
     if member_id:
-        duplicate = query_one("SELECT id FROM users WHERE username=? AND id<>?", (username, member_id))
+        duplicate = query_one("SELECT id FROM users WHERE username=? AND id<>? AND COALESCE(purged,0)=0", (username, member_id))
         if duplicate:
             return RedirectResponse(f"/admin/members?error={quote('同じログインIDが既に使われています')}", status_code=303)
         if password:
             execute(
-                "UPDATE users SET name=?, username=?, password_hash=?, phone=?, vehicle=? WHERE id=? AND role='member' AND company_id=?",
+                "UPDATE users SET name=?, username=?, password_hash=?, phone=?, vehicle=? WHERE id=? AND role='member' AND company_id=? AND COALESCE(purged,0)=0",
                 (name, username, hash_password(password), phone, vehicle, member_id, company_id),
             )
         else:
-            execute("UPDATE users SET name=?, username=?, phone=?, vehicle=? WHERE id=? AND role='member' AND company_id=?", (name, username, phone, vehicle, member_id, company_id))
+            execute("UPDATE users SET name=?, username=?, phone=?, vehicle=? WHERE id=? AND role='member' AND company_id=? AND COALESCE(purged,0)=0", (name, username, phone, vehicle, member_id, company_id))
         return RedirectResponse("/admin/members?message=" + quote("メンバー情報を更新しました"), status_code=303)
-    existing = query_one("SELECT * FROM users WHERE username=? AND role='member' AND company_id=?", (username, company_id))
-    if existing and existing["active"] == 1:
+    existing = query_one("SELECT * FROM users WHERE username=? AND COALESCE(purged,0)=0", (username,))
+    if existing and row_value(existing, "role") == "member" and existing["active"] == 1:
         return RedirectResponse(f"/admin/members?error={quote('同じログインIDの在籍中メンバーがいます')}", status_code=303)
-    if existing and existing["active"] == 0:
-        if password:
-            execute(
-                "UPDATE users SET name=?, password_hash=?, phone=?, vehicle=?, active=1 WHERE id=? AND company_id=?",
-                (name, hash_password(password), phone, vehicle, existing["id"], company_id),
-            )
-        else:
-            execute("UPDATE users SET name=?, phone=?, vehicle=?, active=1 WHERE id=? AND company_id=?", (name, phone, vehicle, existing["id"], company_id))
-        execute("INSERT OR IGNORE INTO rates(user_id, company_id) VALUES (?, ?)", (existing["id"], company_id))
-        return RedirectResponse("/admin/members?message=" + quote("退職済みメンバーを在籍中に戻しました"), status_code=303)
+    if existing and row_value(existing, "role") == "member" and existing["active"] == 0:
+        return RedirectResponse(f"/admin/members?error={quote('同じログインIDの退職済みメンバーがいます。完全削除後に再登録できます')}", status_code=303)
+    if existing:
+        return RedirectResponse(f"/admin/members?error={quote('同じログインIDが既に使われています')}", status_code=303)
     try:
         cur = execute(
             "INSERT INTO users(company_id, name, username, password_hash, role, phone, vehicle, created_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -1712,11 +1730,11 @@ def purge_retired_member(member_id: int, user=Depends(require_admin)):
         return RedirectResponse(f"/admin/members?error={quote('在籍中メンバーは完全削除できません。先に退職扱いにしてください')}", status_code=303)
     now_dt = app_now()
     now = now_dt.isoformat(timespec="seconds")
-    anonymized_username = f"deleted_member_{member_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    anonymized_username = deleted_username_for(member_id)
     execute(
         """UPDATE users
            SET name=?, username=?, password_hash=?, phone='', vehicle='', active=0, purged=1, deleted_at=?
-           WHERE id=? AND role='member' AND active=0 AND company_id=?""",
+           WHERE id=? AND role='member' AND active=0 AND company_id=? AND COALESCE(purged,0)=0""",
         (f"削除済みメンバー{member_id}", anonymized_username, hash_password(anonymized_username), now, member_id, company_id),
     )
     return RedirectResponse("/admin/members?message=" + quote("退職済みメンバーを完全削除しました。過去記録は匿名化された名前で保持されます"), status_code=303)
@@ -1766,7 +1784,8 @@ def update_admin_account(
     username = username.strip()
     if not username:
         return RedirectResponse("/admin/settings?error=" + quote("ログインIDを入力してください"), status_code=303)
-    duplicate = query_one("SELECT id FROM users WHERE username=? AND id<>?", (username, user["id"]))
+    release_purged_username(username)
+    duplicate = query_one("SELECT id FROM users WHERE username=? AND id<>? AND COALESCE(purged,0)=0", (username, user["id"]))
     if duplicate:
         return RedirectResponse("/admin/settings?error=" + quote("同じログインIDが既に使われています"), status_code=303)
     if password:
@@ -1787,13 +1806,14 @@ def update_member_login(
     username = username.strip()
     if not username:
         return RedirectResponse("/admin/settings?error=" + quote("メンバーのログインIDを入力してください"), status_code=303)
+    release_purged_username(username)
     member = query_one(
         "SELECT id FROM users WHERE id=? AND role='member' AND company_id=? AND COALESCE(purged,0)=0",
         (member_id, company_id),
     )
     if not member:
         return RedirectResponse("/admin/settings?error=" + quote("メンバーが見つかりません"), status_code=303)
-    duplicate = query_one("SELECT id FROM users WHERE username=? AND id<>?", (username, member_id))
+    duplicate = query_one("SELECT id FROM users WHERE username=? AND id<>? AND COALESCE(purged,0)=0", (username, member_id))
     if duplicate:
         return RedirectResponse("/admin/settings?error=" + quote("同じログインIDが既に使われています"), status_code=303)
     if password:
@@ -1820,6 +1840,7 @@ def save_company(
     name = name.strip()
     code = code.strip()
     admin_username = admin_username.strip()
+    release_purged_username(admin_username)
     active_int = 1 if active == "1" else 0
     admin_name = f"{name} 管理者" if name else "管理者"
 
@@ -1846,7 +1867,7 @@ def save_company(
         return RedirectResponse("/admin/settings?error=" + quote("同じ会社コードが既に使われています"), status_code=303)
 
     ignore_admin_id = admin["id"] if admin else 0
-    duplicate_username = query_one("SELECT id FROM users WHERE username=? AND id<>?", (admin_username, ignore_admin_id))
+    duplicate_username = query_one("SELECT id FROM users WHERE username=? AND id<>? AND COALESCE(purged,0)=0", (admin_username, ignore_admin_id))
     if duplicate_username:
         return RedirectResponse("/admin/settings?error=" + quote("同じログインIDが既に使われています"), status_code=303)
 
