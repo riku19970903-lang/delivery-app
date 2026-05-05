@@ -69,6 +69,22 @@ SHIFT_ALLOWED_STATUSES = {"出勤", "1便", "2便", "3便", "休み"}
 SHIFT_IMPORT_HEADERS = ["日付", "名前", "出勤区分", "配達エリア", "便", "備考"]
 SHIFT_IMPORT_LIMIT = 500
 FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+FEATURE_CATALOG = [
+    {"key": "basic", "label": "基本管理", "price": 3000, "note": "課金予定"},
+    {"key": "members", "label": "メンバー管理", "price": 0, "note": "テスト中"},
+    {"key": "deliveries", "label": "配達個数管理", "price": 2000, "note": "課金予定"},
+    {"key": "rewards", "label": "給料・報酬管理", "price": 3000, "note": "課金予定"},
+    {"key": "shifts", "label": "シフト管理10人まで", "price": 2000, "note": "課金予定"},
+    {"key": "shifts_20", "label": "シフト管理20人まで", "price": 4000, "note": "課金予定"},
+    {"key": "inspection_ocr", "label": "点検表OCR", "price": 3000, "note": "課金予定"},
+    {"key": "safety", "label": "安全記録", "price": 1000, "note": "テスト中"},
+    {"key": "vehicle", "label": "車両管理", "price": 1000, "note": "テスト中"},
+    {"key": "issues", "label": "不具合管理", "price": 1000, "note": "テスト中"},
+    {"key": "holidays", "label": "休み希望管理", "price": 1000, "note": "テスト中"},
+    {"key": "multi_depot", "label": "複数拠点管理", "price": 2000, "note": "テスト中"},
+]
+FEATURE_KEYS = {item["key"] for item in FEATURE_CATALOG}
+FEATURE_ALIASES = {"shifts": ("shifts", "shifts_20"), "inspection": ("inspection_ocr",)}
 
 
 def app_now():
@@ -77,6 +93,15 @@ def app_now():
 
 def app_today():
     return app_now().date()
+
+
+def seed_company_features(conn, company_id: int, enabled: int = 1):
+    now = datetime.now().isoformat(timespec="seconds")
+    for feature in FEATURE_CATALOG:
+        conn.execute(
+            "INSERT OR IGNORE INTO company_features(company_id, feature_key, enabled, updated_at) VALUES (?,?,?,?)",
+            (company_id, feature["key"], enabled, now),
+        )
 
 
 if USE_POSTGRES:
@@ -404,6 +429,46 @@ def query_all(sql: str, params=()):
         return conn.execute(sql, params).fetchall()
 
 
+def feature_price_label(feature):
+    price = int(feature.get("price") or 0)
+    return "基本プランに含む" if price <= 0 else f"月額{price:,}円"
+
+
+def is_feature_enabled(features, key: str) -> bool:
+    keys = FEATURE_ALIASES.get(key, (key,))
+    return any(bool(features.get(item, True)) for item in keys)
+
+
+def load_company_features(company_id: int):
+    enabled = {feature["key"]: True for feature in FEATURE_CATALOG}
+    rows = query_all("SELECT feature_key, enabled FROM company_features WHERE company_id=?", (company_id,))
+    for row in rows:
+        key = row["feature_key"]
+        if key in FEATURE_KEYS:
+            enabled[key] = bool(row["enabled"])
+    return enabled
+
+
+def company_feature_rows(company_id: int):
+    enabled = load_company_features(company_id)
+    rows = []
+    for feature in FEATURE_CATALOG:
+        item = dict(feature)
+        item["enabled"] = bool(enabled.get(feature["key"], True))
+        item["price_label"] = feature_price_label(feature)
+        rows.append(item)
+    return rows
+
+
+def feature_enabled_for_company(company_id: int, key: str) -> bool:
+    return is_feature_enabled(load_company_features(company_id), key)
+
+
+def require_feature(user, key: str):
+    if not feature_enabled_for_company(company_id_for(user), key):
+        raise HTTPException(status_code=403, detail="この機能は未契約です")
+
+
 def ensure_column(conn, table: str, column: str, definition: str):
     if USE_POSTGRES:
         exists = conn.execute(
@@ -701,6 +766,14 @@ def _init_db_schema():
                 FOREIGN KEY(delivery_id) REFERENCES deliveries(id),
                 UNIQUE(user_id, slip_date)
             );
+            CREATE TABLE IF NOT EXISTS company_features (
+                company_id INTEGER NOT NULL,
+                feature_key TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(company_id, feature_key),
+                FOREIGN KEY(company_id) REFERENCES companies(id)
+            );
             """
         )
         ensure_column(conn, "companies", "code", "TEXT DEFAULT ''")
@@ -774,6 +847,8 @@ def _init_db_schema():
         ensure_column(conn, "vehicle_issues", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "holiday_requests", "company_id", "INTEGER NOT NULL DEFAULT 1")
         conn.execute("INSERT OR IGNORE INTO companies(id, name, created_at) VALUES (1, ?, ?)", ("SPARKLE DRIVE", datetime.now().isoformat(timespec="seconds")))
+        for company in conn.execute("SELECT id FROM companies").fetchall():
+            seed_company_features(conn, company["id"], 1)
         admin = conn.execute("SELECT id FROM users WHERE username = 'admin'").fetchone()
         if not admin:
             now = datetime.now().isoformat(timespec="seconds")
@@ -917,6 +992,7 @@ def inspection_file(request: Request, path: str = "", user=Depends(require_user)
 
 def render(request: Request, name: str, context: dict):
     user = current_user(request)
+    features = load_company_features(company_id_for(user)) if user else {feature["key"]: True for feature in FEATURE_CATALOG}
     context.update(
         {
             "request": request,
@@ -924,6 +1000,9 @@ def render(request: Request, name: str, context: dict):
             "today": app_today().isoformat(),
             "app_name": APP_NAME,
             "company_name": company_name_for(user) if user else APP_NAME,
+            "features": features,
+            "feature_enabled": lambda key: is_feature_enabled(features, key),
+            "can_manage_companies": can_manage_companies(user) if user else False,
         }
     )
     return templates.TemplateResponse(name, context)
@@ -1662,6 +1741,7 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
 
 @app.get("/admin/members", response_class=HTMLResponse)
 def members_page(request: Request, message: str = "", error: str = "", user=Depends(require_admin)):
+    require_feature(user, "members")
     company_id = company_id_for(user)
     active_members = query_all("SELECT * FROM users WHERE role = 'member' AND active = 1 AND COALESCE(purged,0)=0 AND company_id=? ORDER BY id LIMIT 200", (company_id,))
     retired_members = query_all("SELECT * FROM users WHERE role = 'member' AND active = 0 AND COALESCE(purged,0)=0 AND company_id=? ORDER BY id LIMIT 200", (company_id,))
@@ -1678,6 +1758,7 @@ def save_member(
     vehicle: str = Form(""),
     user=Depends(require_admin),
 ):
+    require_feature(user, "members")
     company_id = company_id_for(user)
     now = app_now().isoformat(timespec="seconds")
     username = username.strip()
@@ -1716,12 +1797,14 @@ def save_member(
 
 @app.post("/admin/members/{member_id}/delete")
 def delete_member(member_id: int, user=Depends(require_admin)):
+    require_feature(user, "members")
     execute("UPDATE users SET active = 0 WHERE id=? AND role='member' AND company_id=?", (member_id, company_id_for(user)))
     return RedirectResponse("/admin/members", status_code=303)
 
 
 @app.post("/admin/members/{member_id}/purge")
 def purge_retired_member(member_id: int, user=Depends(require_admin)):
+    require_feature(user, "members")
     company_id = company_id_for(user)
     member = query_one("SELECT * FROM users WHERE id=? AND role='member' AND company_id=?", (member_id, company_id))
     if not member:
@@ -1741,8 +1824,15 @@ def purge_retired_member(member_id: int, user=Depends(require_admin)):
 
 
 @app.get("/admin/settings", response_class=HTMLResponse)
-def admin_settings_page(request: Request, message: str = "", error: str = "", user=Depends(require_admin)):
+def admin_settings_page(
+    request: Request,
+    message: str = "",
+    error: str = "",
+    feature_company_id: Optional[int] = None,
+    user=Depends(require_admin),
+):
     company_id = company_id_for(user)
+    can_manage = can_manage_companies(user)
     members = query_all(
         """SELECT id, name, username, active
            FROM users
@@ -1752,7 +1842,7 @@ def admin_settings_page(request: Request, message: str = "", error: str = "", us
         (company_id,),
     )
     companies = []
-    if can_manage_companies(user):
+    if can_manage:
         companies = query_all(
             """SELECT c.*,
                       (SELECT username FROM users au
@@ -1762,13 +1852,24 @@ def admin_settings_page(request: Request, message: str = "", error: str = "", us
                ORDER BY c.id
                LIMIT 200"""
         )
+    feature_companies = companies if can_manage else query_all("SELECT id, name FROM companies WHERE id=?", (company_id,))
+    feature_target_id = company_id
+    if can_manage and feature_company_id:
+        selected_company = query_one("SELECT id FROM companies WHERE id=?", (feature_company_id,))
+        if selected_company:
+            feature_target_id = feature_company_id
+    feature_target_company = query_one("SELECT id, name FROM companies WHERE id=?", (feature_target_id,))
     return render(
         request,
         "admin_settings.html",
         {
             "members": members,
             "companies": companies,
-            "can_manage_companies": can_manage_companies(user),
+            "can_manage_companies": can_manage,
+            "feature_companies": feature_companies,
+            "feature_target_company": feature_target_company,
+            "feature_target_id": feature_target_id,
+            "feature_rows": company_feature_rows(feature_target_id),
             "message": message,
             "error": error,
         },
@@ -1802,6 +1903,7 @@ def update_member_login(
     password: str = Form(""),
     user=Depends(require_admin),
 ):
+    require_feature(user, "members")
     company_id = company_id_for(user)
     username = username.strip()
     if not username:
@@ -1903,7 +2005,45 @@ def save_company(
         "INSERT INTO users(company_id, name, username, password_hash, role, phone, vehicle, active, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
         (new_company_id, admin_name, admin_username, hash_password(admin_password), "admin", "", "", 1, now),
     )
+    with db() as conn:
+        seed_company_features(conn, new_company_id, 1)
+        conn.commit()
     return RedirectResponse("/admin/settings?message=" + quote("会社と管理者を追加しました"), status_code=303)
+
+
+@app.post("/admin/settings/features")
+def update_company_features(
+    feature_company_id: int = Form(...),
+    features: Optional[List[str]] = Form(None),
+    user=Depends(require_admin),
+):
+    own_company_id = company_id_for(user)
+    target_company_id = feature_company_id if can_manage_companies(user) else own_company_id
+    if not can_manage_companies(user) and feature_company_id != own_company_id:
+        raise HTTPException(status_code=403, detail="他社の機能設定は変更できません")
+    company = query_one("SELECT id FROM companies WHERE id=?", (target_company_id,))
+    if not company:
+        return RedirectResponse("/admin/settings?error=" + quote("会社が見つかりません"), status_code=303)
+    selected = set(features or [])
+    unknown = selected - FEATURE_KEYS
+    if unknown:
+        return RedirectResponse("/admin/settings?error=" + quote("不明な機能が含まれています"), status_code=303)
+    now = app_now().isoformat(timespec="seconds")
+    with db() as conn:
+        for feature in FEATURE_CATALOG:
+            enabled = 1 if feature["key"] in selected else 0
+            conn.execute(
+                """INSERT INTO company_features(company_id, feature_key, enabled, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(company_id, feature_key) DO UPDATE SET
+                   enabled=excluded.enabled, updated_at=excluded.updated_at""",
+                (target_company_id, feature["key"], enabled, now),
+            )
+        conn.commit()
+    return RedirectResponse(
+        f"/admin/settings?feature_company_id={target_company_id}&message=" + quote("利用機能・プラン設定を更新しました"),
+        status_code=303,
+    )
 
 
 @app.get("/settings", response_class=HTMLResponse)
@@ -1930,6 +2070,7 @@ def update_own_password(
 
 @app.get("/admin/rates", response_class=HTMLResponse)
 def rates_page(request: Request, user=Depends(require_admin)):
+    require_feature(user, "rewards")
     company_id = company_id_for(user)
     rows = query_all(
         """SELECT u.id, u.name, r.* FROM users u LEFT JOIN rates r ON r.user_id = u.id AND r.company_id=?
@@ -1952,6 +2093,7 @@ def save_rates(
     vehicle_monthly_fee: int = Form(0),
     user=Depends(require_admin),
 ):
+    require_feature(user, "rewards")
     company_id = company_id_for(user)
     member = query_one("SELECT id FROM users WHERE id=? AND role='member' AND company_id=?", (user_id, company_id))
     if not member:
@@ -1974,12 +2116,14 @@ def save_rates(
 
 @app.get("/admin/vehicle-rates", response_class=HTMLResponse)
 def vehicle_rates_page(request: Request, user=Depends(require_admin)):
+    require_feature(user, "vehicle")
     rates = query_one("SELECT * FROM vehicle_rates WHERE id=1")
     return render(request, "vehicle_rates.html", {"rates": rates})
 
 
 @app.post("/admin/vehicle-rates")
 def save_vehicle_rates(daily_fee: int = Form(...), monthly_fee: int = Form(...), user=Depends(require_admin)):
+    require_feature(user, "vehicle")
     execute("UPDATE vehicle_rates SET daily_fee=?, monthly_fee=? WHERE id=1", (daily_fee, monthly_fee))
     return RedirectResponse("/admin/vehicle-rates", status_code=303)
 
@@ -2016,6 +2160,7 @@ def member_home(request: Request, user=Depends(require_user)):
 
 @app.get("/work-log", response_class=HTMLResponse)
 def work_log_page(request: Request, type: str = "start", user=Depends(require_user)):
+    require_feature(user, "safety")
     log_type = type if type in {"start", "end"} else "start"
     now = app_now()
     logs = query_all(
@@ -2050,6 +2195,7 @@ def save_work_log(
     notes: str = Form(""),
     user=Depends(require_user),
 ):
+    require_feature(user, "safety")
     execute(
         """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, alcohol_result, detector_used,
            intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at)
@@ -2061,6 +2207,7 @@ def save_work_log(
 
 @app.get("/deliveries", response_class=HTMLResponse)
 def delivery_page(request: Request, day: Optional[str] = None, user=Depends(require_user)):
+    require_feature(user, "deliveries")
     target = day or app_today().isoformat()
     if user["role"] == "admin":
         company_id = company_id_for(user)
@@ -2118,6 +2265,7 @@ async def save_delivery(
     inspection_image: Optional[UploadFile] = File(None),
     user=Depends(require_user),
 ):
+    require_feature(user, "deliveries")
     if user["role"] == "admin":
         raise HTTPException(status_code=403, detail="メンバーとしてログインしてください")
     now_dt = app_now()
@@ -2164,6 +2312,7 @@ async def save_delivery(
 
 @app.get("/inspection-sheets", response_class=HTMLResponse)
 def inspection_sheets_page(request: Request, day: Optional[str] = None, member_id: Optional[int] = None, user=Depends(require_user)):
+    require_feature(user, "inspection")
     target = day or app_today().isoformat()
     if user["role"] == "admin":
         company_id = company_id_for(user)
@@ -2201,6 +2350,7 @@ def inspection_sheets_page(request: Request, day: Optional[str] = None, member_i
 
 @app.post("/inspection-sheets")
 async def upload_inspection_sheet(sheet_date: str = Form(...), image: UploadFile = File(...), user=Depends(require_user)):
+    require_feature(user, "inspection")
     if user["role"] == "admin":
         raise HTTPException(status_code=403, detail="メンバーとしてアップロードしてください")
     if not image.content_type or not image.content_type.startswith("image/"):
@@ -2279,6 +2429,7 @@ def inspection_sheet_for_user(sheet_id: int, user):
 
 @app.get("/inspection-sheets/{sheet_id}/correct", response_class=HTMLResponse)
 def inspection_sheet_correct_page(request: Request, sheet_id: int, user=Depends(require_user)):
+    require_feature(user, "inspection")
     sheet = with_image_info(inspection_sheet_for_user(sheet_id, user))
     extracted_fields = extract_inspection_fields(sheet.get("ocr_text", "") or "", fallback_date=sheet.get("delivery_date") or sheet["sheet_date"])
     target_date = sheet.get("delivery_date") or extracted_fields["work_date"] or sheet["sheet_date"]
@@ -2318,6 +2469,7 @@ def apply_inspection_sheet_counts(
     large: int = Form(0),
     user=Depends(require_user),
 ):
+    require_feature(user, "inspection")
     sheet = inspection_sheet_for_user(sheet_id, user)
     company_id = int(row_value(sheet, "company_id", company_id_for(user)) or company_id_for(user))
     target_date = normalize_import_date(work_date)
@@ -2379,6 +2531,7 @@ def apply_inspection_sheet_counts(
 
 @app.get("/rewards", response_class=HTMLResponse)
 def rewards_page(request: Request, ym: Optional[str] = None, member_id: Optional[int] = None, user=Depends(require_user)):
+    require_feature(user, "rewards")
     start, end = month_bounds(ym)
     viewing_user_id = user["id"]
     members = []
@@ -2411,6 +2564,7 @@ def rewards_page(request: Request, ym: Optional[str] = None, member_id: Optional
 
 @app.get("/vehicle-issues", response_class=HTMLResponse)
 def vehicle_issues_page(request: Request, user=Depends(require_user)):
+    require_feature(user, "issues")
     ensure_vehicle_issue_schema()
     if user["role"] == "admin":
         issues = query_all("""SELECT v.*, u.name FROM vehicle_issues v JOIN users u ON u.id=v.user_id WHERE v.company_id=? ORDER BY v.created_at DESC LIMIT 100""", (company_id_for(user),))
@@ -2439,6 +2593,7 @@ def vehicle_issues_page(request: Request, user=Depends(require_user)):
 
 @app.post("/vehicle-issues")
 def save_vehicle_issue(issue_date: str = Form(...), vehicle_name: str = Form(...), severity: str = Form(...), detail: str = Form(...), user=Depends(require_user)):
+    require_feature(user, "issues")
     ensure_vehicle_issue_schema()
     if user["role"] == "admin":
         raise HTTPException(status_code=403, detail="メンバーとして入力してください")
@@ -2458,6 +2613,7 @@ def save_vehicle_issue(issue_date: str = Form(...), vehicle_name: str = Form(...
 
 @app.post("/vehicle-issues/{issue_id}/status")
 def update_vehicle_issue_status(issue_id: int, status: str = Form(...), user=Depends(require_admin)):
+    require_feature(user, "issues")
     ensure_vehicle_issue_schema()
     if status not in ISSUE_STATUSES:
         raise HTTPException(status_code=400, detail="状態が正しくありません")
@@ -2477,6 +2633,7 @@ def update_vehicle_issue_status(issue_id: int, status: str = Form(...), user=Dep
 
 @app.get("/holidays", response_class=HTMLResponse)
 def holidays_page(request: Request, user=Depends(require_user)):
+    require_feature(user, "holidays")
     ym = request.query_params.get("ym")
     start, end = month_bounds(ym)
     if user["role"] == "admin":
@@ -2507,6 +2664,7 @@ def holidays_page(request: Request, user=Depends(require_user)):
 
 @app.post("/holidays")
 def save_holiday(request_date: str = Form(...), reason: str = Form(""), user=Depends(require_user)):
+    require_feature(user, "holidays")
     if user["role"] == "admin":
         raise HTTPException(status_code=403, detail="メンバーとして入力してください")
     execute(
@@ -2519,11 +2677,13 @@ def save_holiday(request_date: str = Form(...), reason: str = Form(""), user=Dep
 
 @app.get("/admin/shifts")
 def admin_shifts_link(user=Depends(require_admin)):
+    require_feature(user, "shifts")
     return RedirectResponse("/shifts", status_code=303)
 
 
 @app.get("/member/shifts")
 def member_shifts_link(user=Depends(require_user)):
+    require_feature(user, "shifts")
     if user["role"] == "admin":
         return RedirectResponse("/shifts", status_code=303)
     return RedirectResponse("/shifts", status_code=303)
@@ -2531,6 +2691,7 @@ def member_shifts_link(user=Depends(require_user)):
 
 @app.get("/shifts", response_class=HTMLResponse)
 def shifts_page(request: Request, ym: Optional[str] = None, message: str = "", user=Depends(require_user)):
+    require_feature(user, "shifts")
     start, end = month_bounds(ym)
     if user["role"] == "admin":
         company_id = company_id_for(user)
@@ -2575,6 +2736,7 @@ def shifts_page(request: Request, ym: Optional[str] = None, message: str = "", u
 
 @app.get("/admin/shifts/import-template")
 def download_shift_import_template(user=Depends(require_admin)):
+    require_feature(user, "shifts")
     rows = [
         SHIFT_IMPORT_HEADERS,
         ["2026-05-05", "笹本", "出勤", "高松1・2・3", "1便", ""],
@@ -2590,6 +2752,7 @@ def download_shift_import_template(user=Depends(require_admin)):
 
 @app.post("/admin/shifts/import/preview", response_class=HTMLResponse)
 async def preview_shift_import(request: Request, import_file: UploadFile = File(...), user=Depends(require_admin)):
+    require_feature(user, "shifts")
     try:
         raw_rows = await load_shift_import_rows(import_file)
         preview = build_shift_import_preview(raw_rows, company_id_for(user))
@@ -2619,6 +2782,7 @@ async def preview_shift_import(request: Request, import_file: UploadFile = File(
 
 @app.post("/admin/shifts/import/commit", response_class=HTMLResponse)
 def commit_shift_import(request: Request, payload: str = Form(...), overwrite_conflicts: Optional[str] = Form(None), user=Depends(require_admin)):
+    require_feature(user, "shifts")
     try:
         rows = json.loads(payload)
     except json.JSONDecodeError as exc:
@@ -2681,12 +2845,14 @@ def save_shift(
     town_ids: List[int] = Form(default=[]),
     user=Depends(require_admin),
 ):
+    require_feature(user, "shifts")
     upsert_shift_record(member_id, shift_date, status, town_ids, company_id=company_id_for(user))
     return RedirectResponse("/shifts", status_code=303)
 
 
 @app.get("/admin/areas", response_class=HTMLResponse)
 def areas_page(request: Request, user=Depends(require_admin)):
+    require_feature(user, "multi_depot")
     depots = query_all("SELECT * FROM depots WHERE active=1 ORDER BY name")
     districts = query_all(
         """SELECT d.*, p.name AS depot_name FROM districts d
@@ -2704,6 +2870,7 @@ def areas_page(request: Request, user=Depends(require_admin)):
 
 @app.post("/admin/areas/districts")
 def save_district(district_id: str = Form(""), depot_id: int = Form(...), name: str = Form(...), user=Depends(require_admin)):
+    require_feature(user, "multi_depot")
     now = datetime.now().isoformat(timespec="seconds")
     if district_id:
         execute("UPDATE districts SET depot_id=?, name=? WHERE id=?", (depot_id, name, district_id))
@@ -2714,6 +2881,7 @@ def save_district(district_id: str = Form(""), depot_id: int = Form(...), name: 
 
 @app.post("/admin/areas/districts/{district_id}/delete")
 def delete_district(district_id: int, user=Depends(require_admin)):
+    require_feature(user, "multi_depot")
     execute("UPDATE districts SET active=0 WHERE id=?", (district_id,))
     execute("UPDATE towns SET active=0 WHERE district_id=?", (district_id,))
     return RedirectResponse("/admin/areas", status_code=303)
@@ -2721,6 +2889,7 @@ def delete_district(district_id: int, user=Depends(require_admin)):
 
 @app.post("/admin/areas/towns")
 def save_town(town_id: str = Form(""), district_id: int = Form(...), name: str = Form(...), user=Depends(require_admin)):
+    require_feature(user, "multi_depot")
     now = datetime.now().isoformat(timespec="seconds")
     if town_id:
         execute("UPDATE towns SET district_id=?, name=? WHERE id=?", (district_id, name, town_id))
@@ -2731,12 +2900,14 @@ def save_town(town_id: str = Form(""), district_id: int = Form(...), name: str =
 
 @app.post("/admin/areas/towns/{town_id}/delete")
 def delete_town(town_id: int, user=Depends(require_admin)):
+    require_feature(user, "multi_depot")
     execute("UPDATE towns SET active=0 WHERE id=?", (town_id,))
     return RedirectResponse("/admin/areas", status_code=303)
 
 
 @app.get("/admin/safety", response_class=HTMLResponse)
 def admin_safety(request: Request, user=Depends(require_admin)):
+    require_feature(user, "safety")
     company_id = company_id_for(user)
     logs = query_all("""SELECT w.*, u.name FROM work_logs w JOIN users u ON u.id=w.user_id WHERE w.company_id=? ORDER BY w.logged_at DESC LIMIT 100""", (company_id,))
     members = query_all("SELECT id, name FROM users WHERE role='member' AND company_id=? ORDER BY active DESC, name LIMIT 200", (company_id,))
@@ -2745,6 +2916,7 @@ def admin_safety(request: Request, user=Depends(require_admin)):
 
 @app.get("/admin/safety/print", response_class=HTMLResponse)
 def admin_safety_print(request: Request, ym: Optional[str] = None, member_id: Optional[int] = None, user=Depends(require_admin)):
+    require_feature(user, "safety")
     start, end = month_bounds(ym)
     company_id = company_id_for(user)
     member = None

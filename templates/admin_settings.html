@@ -5,7 +5,7 @@
 {% if message %}<p class="success">{{ message }}</p>{% endif %}
 
 {% if can_manage_companies %}
-<section class="panel settings-panel">
+<section class="panel settings-panel" id="company-management">
   <h2>会社管理</h2>
   <form method="post" action="/admin/settings/company" class="formgrid" onsubmit="return confirm('会社と管理者アカウントを追加します。保存しますか？');">
     <input type="hidden" name="company_id" value="">
@@ -43,6 +43,38 @@
 </section>
 {% endif %}
 
+<section class="panel settings-panel" id="feature-plan">
+  <h2>利用機能・プラン設定</h2>
+  <p class="hint">現在は課金予定・テスト中の設定です。実際の請求処理は行いません。</p>
+  {% if can_manage_companies %}
+  <form method="get" action="/admin/settings" class="formgrid">
+    <label>設定対象会社
+      <select name="feature_company_id">
+        {% for c in feature_companies %}
+        <option value="{{ c.id }}" {{ 'selected' if c.id == feature_target_id else '' }}>{{ c.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="button">対象を表示</button>
+  </form>
+  {% endif %}
+  <form method="post" action="/admin/settings/features" onsubmit="return confirm('{{ feature_target_company.name if feature_target_company else company_name }} の利用機能を変更します。保存しますか？');">
+    <input type="hidden" name="feature_company_id" value="{{ feature_target_id }}">
+    <div class="feature-grid">
+      {% for f in feature_rows %}
+      <label class="feature-card">
+        <input type="checkbox" name="features" value="{{ f.key }}" {{ 'checked' if f.enabled else '' }}>
+        <span>
+          <b>{{ f.label }}</b>
+          <small>{{ f.price_label }} / {{ f.note }}</small>
+        </span>
+      </label>
+      {% endfor %}
+    </div>
+    <button class="primary">利用機能を保存</button>
+  </form>
+</section>
+
 <section class="panel settings-panel">
   <h2>管理者アカウント</h2>
   <form method="post" action="/admin/settings/account" class="formgrid" onsubmit="return confirm('管理者のログイン情報を変更します。保存しますか？');">
@@ -52,6 +84,7 @@
   </form>
 </section>
 
+{% if feature_enabled('members') %}
 <section class="panel settings-panel">
   <h2>メンバーログイン設定</h2>
   {% for m in members %}
@@ -67,4 +100,5 @@
   <p class="hint">メンバーがいません。</p>
   {% endfor %}
 </section>
+{% endif %}
 {% endblock %}

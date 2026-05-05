@@ -3,6 +3,7 @@
 <section class="home-hero">
   <p class="eyebrow">SPARKLE DRIVE</p>
   <h1>{{ user.name }}さんのドライブホーム</h1>
+  {% if feature_enabled('rewards') %}
   <div class="reward-main">
     <span>今月の見込み報酬</span>
     <strong>{{ "{:,}".format(month_summary.net_total) }}円</strong>
@@ -10,14 +11,30 @@
     <small>車両代差し引き前 {{ "{:,}".format(month_summary.gross_total) }}円 / 差引 {{ "{:,}".format(month_summary.vehicle_deduction) }}円</small>
     {% endif %}
   </div>
+  {% endif %}
+</section>
+
+<section class="mobile-menu-panel">
+  <div class="mobile-menu-grid">
+    {% if feature_enabled('safety') %}<a class="mobile-menu-item start" href="/work-log?type=start"><span>出</span><b>出勤</b></a>{% endif %}
+    {% if feature_enabled('safety') %}<a class="mobile-menu-item end" href="/work-log?type=end"><span>退</span><b>退勤</b></a>{% endif %}
+    {% if feature_enabled('deliveries') %}<a class="mobile-menu-item" href="/deliveries"><span>配</span><b>配達入力</b></a>{% endif %}
+    {% if feature_enabled('inspection') %}<a class="mobile-menu-item" href="/inspection-sheets"><span>点</span><b>点検表</b></a>{% endif %}
+    {% if feature_enabled('shifts') %}<a class="mobile-menu-item" href="/member/shifts"><span>シ</span><b>シフト</b></a>{% endif %}
+    {% if feature_enabled('holidays') %}<a class="mobile-menu-item" href="/holidays"><span>休</span><b>休み希望</b></a>{% endif %}
+    {% if feature_enabled('rewards') %}<a class="mobile-menu-item" href="/rewards"><span>売</span><b>売上・報酬</b></a>{% endif %}
+    {% if feature_enabled('issues') %}<a class="mobile-menu-item" href="/vehicle-issues"><span>不</span><b>不具合</b></a>{% endif %}
+    <a class="mobile-menu-item" href="/settings"><span>設</span><b>設定</b></a>
+  </div>
 </section>
 
 <div class="grid stats home-stats">
-  <div class="tile"><span>本日の報酬見込み</span><strong>{{ "{:,}".format(reward) }}円</strong></div>
-  <div class="tile"><span>今月の配達完了数</span><strong>{{ "{:,}".format(month_summary.completed_total) }}個</strong></div>
-  <div class="tile"><span>本日のシフト</span><strong>{{ today_shift.status if today_shift else "未定" }}</strong></div>
+  {% if feature_enabled('rewards') %}<div class="tile"><span>本日の報酬見込み</span><strong>{{ "{:,}".format(reward) }}円</strong></div>{% endif %}
+  {% if feature_enabled('deliveries') %}<div class="tile"><span>今月の配達完了数</span><strong>{{ "{:,}".format(month_summary.completed_total) }}個</strong></div>{% endif %}
+  {% if feature_enabled('shifts') %}<div class="tile"><span>本日のシフト</span><strong>{{ today_shift.status if today_shift else "未定" }}</strong></div>{% endif %}
 </div>
 
+{% if feature_enabled('safety') %}
 <section class="panel app-card">
   <h2>出勤・退勤</h2>
   <div class="punch-actions">
@@ -25,7 +42,9 @@
     <a class="button punch-end" href="/work-log?type=end">退勤する</a>
   </div>
 </section>
+{% endif %}
 
+{% if feature_enabled('shifts') %}
 <section class="panel app-card">
   <h2>シフト予定</h2>
   {% if today_shift %}
@@ -54,13 +73,14 @@
     {% endfor %}
   </div>
 </section>
+{% endif %}
 
 <section class="comment">{{ comment }}</section>
 
 <div class="actions home-actions">
-  <a class="button primary" href="/inspection-sheets">点検表を撮影する</a>
-  <a class="button primary" href="/deliveries">配達個数を入力</a>
-  <a class="button" href="/rewards">月間報酬を見る</a>
-  <a class="button" href="/member/shifts">シフトを見る</a>
+  {% if feature_enabled('inspection') %}<a class="button primary" href="/inspection-sheets">点検表を撮影する</a>{% endif %}
+  {% if feature_enabled('deliveries') %}<a class="button primary" href="/deliveries">配達個数を入力</a>{% endif %}
+  {% if feature_enabled('rewards') %}<a class="button" href="/rewards">月間報酬を見る</a>{% endif %}
+  {% if feature_enabled('shifts') %}<a class="button" href="/member/shifts">シフトを見る</a>{% endif %}
 </div>
 {% endblock %}
