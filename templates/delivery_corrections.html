@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>配達修正履歴</h1>
+<form class="toolbar">
+  <label>日付<input type="date" name="day" value="{{ target }}"></label>
+  <button>表示</button>
+  <a class="button" href="/deliveries?day={{ target }}">配達一覧へ戻る</a>
+</form>
+<section class="panel tablewrap">
+  <table>
+    <tr><th>修正日時</th><th>メンバー</th><th>修正者</th><th>対象日</th><th>修正前</th><th>修正後</th><th>経路</th></tr>
+    {% for c in rows %}
+    <tr>
+      <td>{{ c.changed_at }}</td>
+      <td>{{ c.member_name }}</td>
+      <td>{{ c.actor_name }}</td>
+      <td>{{ c.work_date }}</td>
+      <td>完了{{ c.before_completed }} / 転送{{ c.before_transfer }} / 夜間{{ c.before_night }} / 集荷{{ c.before_pickup }} / 大型{{ c.before_large }}</td>
+      <td>完了{{ c.after_completed }} / 転送{{ c.after_transfer }} / 夜間{{ c.after_night }} / 集荷{{ c.after_pickup }} / 大型{{ c.after_large }}</td>
+      <td>{{ c.source }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">修正履歴はありません。</td></tr>
+    {% endfor %}
+  </table>
+</section>
+{% endblock %}

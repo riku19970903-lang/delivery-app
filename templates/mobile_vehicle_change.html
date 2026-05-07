@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="flow-shell">
+  <div class="flow-page-head">
+    <p class="flow-eyebrow">車両変更</p>
+    <h1>使用車両を選ぶ</h1>
+    <p>途中で車両を変えた場合は、ここで選び直してください。</p>
+  </div>
+  <form method="post" class="flow-card">
+    {% if vehicles %}
+    <label>使用車両
+      <select name="vehicle_id" required>
+        {% for vehicle in vehicles %}
+        <option value="{{ vehicle.id }}" {% if selected_vehicle and vehicle.id == selected_vehicle.id %}selected{% endif %}>{{ vehicle.name }}{% if vehicle.plate_number %}（{{ vehicle.plate_number }}）{% endif %}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="flow-submit start">この車両に変更</button>
+    {% else %}
+    <p class="alert">車両が未登録です。管理者に車両登録を依頼してください。</p>
+    <a class="button" href="/member">ホームへ戻る</a>
+    {% endif %}
+  </form>
+</section>
+{% endblock %}

@@ -226,7 +226,7 @@ def _append_sql_clause(sql: str, clause: str) -> str:
 
 def _needs_returning_id(sql: str) -> bool:
     return bool(
-        re.match(r"^\s*INSERT\s+INTO\s+(users|vehicle_issues|companies)\b", sql, flags=re.IGNORECASE)
+        re.match(r"^\s*INSERT\s+INTO\s+(users|vehicle_issues|companies|vehicles)\b", sql, flags=re.IGNORECASE)
         and "RETURNING" not in sql.upper()
         and "ON CONFLICT" not in sql.upper()
     )
@@ -733,6 +733,23 @@ def _init_db_schema():
                 daily_fee INTEGER NOT NULL DEFAULT 1500,
                 monthly_fee INTEGER NOT NULL DEFAULT 30000
             );
+            CREATE TABLE IF NOT EXISTS vehicles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL DEFAULT 1,
+                name TEXT NOT NULL,
+                plate_number TEXT DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                last_odometer INTEGER NOT NULL DEFAULT 0,
+                last_used_at TEXT DEFAULT '',
+                oil_change_odometer INTEGER NOT NULL DEFAULT 0,
+                oil_change_date TEXT DEFAULT '',
+                inspection_due TEXT DEFAULT '',
+                tire_note TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT DEFAULT '',
+                UNIQUE(company_id, name),
+                FOREIGN KEY(company_id) REFERENCES companies(id)
+            );
             CREATE TABLE IF NOT EXISTS work_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 company_id INTEGER NOT NULL DEFAULT 1,
@@ -740,6 +757,8 @@ def _init_db_schema():
                 work_date TEXT NOT NULL,
                 log_type TEXT NOT NULL CHECK(log_type IN ('start','end')),
                 logged_at TEXT NOT NULL,
+                vehicle_id INTEGER,
+                vehicle_name TEXT DEFAULT '',
                 odometer INTEGER NOT NULL DEFAULT 0,
                 alcohol_result TEXT NOT NULL,
                 detector_used TEXT NOT NULL,
@@ -770,6 +789,29 @@ def _init_db_schema():
                 updated_at TEXT NOT NULL,
                 UNIQUE(user_id, work_date),
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS delivery_corrections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL DEFAULT 1,
+                delivery_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                actor_id INTEGER NOT NULL,
+                work_date TEXT NOT NULL,
+                before_completed INTEGER NOT NULL DEFAULT 0,
+                before_transfer INTEGER NOT NULL DEFAULT 0,
+                before_night INTEGER NOT NULL DEFAULT 0,
+                before_pickup INTEGER NOT NULL DEFAULT 0,
+                before_large INTEGER NOT NULL DEFAULT 0,
+                after_completed INTEGER NOT NULL DEFAULT 0,
+                after_transfer INTEGER NOT NULL DEFAULT 0,
+                after_night INTEGER NOT NULL DEFAULT 0,
+                after_pickup INTEGER NOT NULL DEFAULT 0,
+                after_large INTEGER NOT NULL DEFAULT 0,
+                source TEXT DEFAULT '',
+                changed_at TEXT NOT NULL,
+                FOREIGN KEY(delivery_id) REFERENCES deliveries(id),
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(actor_id) REFERENCES users(id)
             );
             CREATE TABLE IF NOT EXISTS vehicle_issues (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -941,6 +983,7 @@ def _init_db_schema():
         ensure_column(conn, "users", "phone", "TEXT DEFAULT ''")
         ensure_column(conn, "users", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "users", "vehicle", "TEXT DEFAULT ''")
+        ensure_column(conn, "users", "last_vehicle_id", "INTEGER")
         ensure_column(conn, "users", "oil_change_date", "TEXT DEFAULT ''")
         ensure_column(conn, "users", "vehicle_inspection_due", "TEXT DEFAULT ''")
         ensure_column(conn, "users", "active", "INTEGER NOT NULL DEFAULT 1")
@@ -958,6 +1001,8 @@ def _init_db_schema():
         ensure_column(conn, "rates", "vehicle_monthly_fee", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "work_logs", "alcohol_result", "TEXT DEFAULT ''")
         ensure_column(conn, "work_logs", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "work_logs", "vehicle_id", "INTEGER")
+        ensure_column(conn, "work_logs", "vehicle_name", "TEXT DEFAULT ''")
         ensure_column(conn, "work_logs", "odometer", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "work_logs", "detector_used", "TEXT DEFAULT ''")
         ensure_column(conn, "work_logs", "intoxicated", "TEXT DEFAULT ''")
@@ -970,6 +1015,8 @@ def _init_db_schema():
         ensure_column(conn, "work_logs", "created_at", "TEXT DEFAULT ''")
         ensure_column(conn, "deliveries", "completed", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "deliveries", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "deliveries", "vehicle_id", "INTEGER")
+        ensure_column(conn, "deliveries", "vehicle_name", "TEXT DEFAULT ''")
         ensure_column(conn, "deliveries", "transfer", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "deliveries", "night", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "deliveries", "pickup", "INTEGER NOT NULL DEFAULT 0")
@@ -979,6 +1026,20 @@ def _init_db_schema():
         ensure_column(conn, "deliveries", "inspection_sheet_path", "TEXT DEFAULT ''")
         ensure_column(conn, "deliveries", "created_at", "TEXT DEFAULT ''")
         ensure_column(conn, "deliveries", "updated_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicles", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "vehicles", "name", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicles", "plate_number", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicles", "active", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "vehicles", "last_odometer", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "vehicles", "last_used_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicles", "oil_change_odometer", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "vehicles", "oil_change_date", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicles", "inspection_due", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicles", "tire_note", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicles", "created_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicles", "updated_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "delivery_corrections", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "delivery_corrections", "source", "TEXT DEFAULT ''")
         ensure_column(conn, "shifts", "start_time", "TEXT DEFAULT ''")
         ensure_column(conn, "shifts", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "shifts", "end_time", "TEXT DEFAULT ''")
@@ -1031,6 +1092,24 @@ def _init_db_schema():
                     (name, username, hash_password(password), "member", phone, vehicle, now),
                 )
                 conn.execute("INSERT OR IGNORE INTO rates(user_id) VALUES (?)", (cur.lastrowid,))
+        vehicle_seed_rows = conn.execute(
+            "SELECT id, company_id, vehicle, last_vehicle_id FROM users WHERE COALESCE(vehicle, '')<>''"
+        ).fetchall()
+        now = datetime.now().isoformat(timespec="seconds")
+        for member in vehicle_seed_rows:
+            vehicle_name = (member["vehicle"] or "").strip()
+            if not vehicle_name:
+                continue
+            conn.execute(
+                "INSERT OR IGNORE INTO vehicles(company_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (member["company_id"], vehicle_name, now, now),
+            )
+            vehicle = conn.execute(
+                "SELECT id FROM vehicles WHERE company_id=? AND name=?",
+                (member["company_id"], vehicle_name),
+            ).fetchone()
+            if vehicle and not member["last_vehicle_id"]:
+                conn.execute("UPDATE users SET last_vehicle_id=? WHERE id=?", (vehicle["id"], member["id"]))
         conn.execute("INSERT OR IGNORE INTO vehicle_rates(id, daily_fee, monthly_fee) VALUES (1, 1500, 30000)")
         now = datetime.now().isoformat(timespec="seconds")
         cur = conn.execute("INSERT OR IGNORE INTO depots(name, created_at) VALUES (?, ?)", ("未設定拠点", now))
@@ -1736,33 +1815,309 @@ def latest_odometer_for_user(user_id: int, company_id: int):
     return row["odometer"] if row else 0
 
 
-def upsert_delivery_counts(company_id: int, user_id: int, work_date: str, completed: int, transfer: int, night: int, pickup: int, large: int, vehicle_rental: str = "none", memo: str = "", inspection_sheet_path: str = ""):
+def int_value(value, default=0):
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def vehicle_rows_for_company(company_id: int, include_inactive: bool = False):
+    condition = "" if include_inactive else " AND active=1"
+    return query_all(
+        f"SELECT * FROM vehicles WHERE company_id=?{condition} ORDER BY active DESC, name LIMIT 200",
+        (company_id,),
+    )
+
+
+def vehicle_for_user(user, company_id: Optional[int] = None):
+    company_id = company_id or company_id_for(user)
+    vehicle_id = row_value(user, "last_vehicle_id")
+    if vehicle_id:
+        vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=?", (vehicle_id, company_id))
+        if vehicle:
+            return vehicle
+    latest = query_one(
+        """SELECT vehicle_id FROM work_logs
+           WHERE user_id=? AND company_id=? AND vehicle_id IS NOT NULL
+           ORDER BY work_date DESC, logged_at DESC LIMIT 1""",
+        (user["id"], company_id),
+    )
+    if latest and latest["vehicle_id"]:
+        vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=?", (latest["vehicle_id"], company_id))
+        if vehicle:
+            return vehicle
+    vehicle_name = (row_value(user, "vehicle", "") or "").strip()
+    if vehicle_name:
+        vehicle = query_one("SELECT * FROM vehicles WHERE company_id=? AND name=?", (company_id, vehicle_name))
+        if vehicle:
+            return vehicle
+    return None
+
+
+def selected_vehicle_context(user):
+    company_id = company_id_for(user)
+    vehicles = vehicle_rows_for_company(company_id)
+    selected = vehicle_for_user(user, company_id)
+    if not selected and vehicles:
+        selected = vehicles[0]
+    return vehicles, selected
+
+
+def latest_vehicle_odometer(company_id: int, vehicle_id: Optional[int]):
+    if not vehicle_id:
+        return 0
+    vehicle = query_one("SELECT last_odometer FROM vehicles WHERE id=? AND company_id=?", (vehicle_id, company_id))
+    if vehicle and vehicle["last_odometer"]:
+        return vehicle["last_odometer"]
+    row = query_one(
+        """SELECT odometer FROM work_logs
+           WHERE company_id=? AND vehicle_id=? AND COALESCE(odometer, 0)>0
+           ORDER BY work_date DESC, logged_at DESC LIMIT 1""",
+        (company_id, vehicle_id),
+    )
+    return row["odometer"] if row else 0
+
+
+def vehicle_label(vehicle):
+    if not vehicle:
+        return "車両未登録"
+    plate = row_value(vehicle, "plate_number", "")
+    return f"{vehicle['name']}（{plate}）" if plate else vehicle["name"]
+
+
+def ensure_vehicle_for_user(company_id: int, user_id: int, vehicle_name: str):
+    vehicle_name = (vehicle_name or "").strip()
+    if not vehicle_name:
+        return
     now = app_now().isoformat(timespec="seconds")
     with db() as conn:
         conn.execute(
-            """INSERT INTO deliveries(company_id, user_id, work_date, completed, transfer, night, pickup, large, vehicle_rental, memo, inspection_sheet_path, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            "INSERT OR IGNORE INTO vehicles(company_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            (company_id, vehicle_name, now, now),
+        )
+        vehicle = conn.execute("SELECT id FROM vehicles WHERE company_id=? AND name=?", (company_id, vehicle_name)).fetchone()
+        if vehicle:
+            conn.execute("UPDATE users SET last_vehicle_id=? WHERE id=? AND company_id=?", (vehicle["id"], user_id, company_id))
+        conn.commit()
+
+
+def update_vehicle_odometer(conn, company_id: int, vehicle_id: Optional[int], vehicle_name: str, odometer: int, used_at: str):
+    if not vehicle_id and not vehicle_name:
+        return
+    if not vehicle_id and vehicle_name:
+        conn.execute(
+            "INSERT OR IGNORE INTO vehicles(company_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            (company_id, vehicle_name, used_at, used_at),
+        )
+        vehicle = conn.execute("SELECT id FROM vehicles WHERE company_id=? AND name=?", (company_id, vehicle_name)).fetchone()
+        vehicle_id = vehicle["id"] if vehicle else None
+    if vehicle_id:
+        conn.execute(
+            """UPDATE vehicles
+               SET last_odometer=CASE WHEN COALESCE(last_odometer,0)<? THEN ? ELSE last_odometer END,
+                   last_used_at=?, updated_at=?
+               WHERE id=? AND company_id=?""",
+            (max(odometer, 0), max(odometer, 0), used_at, used_at, vehicle_id, company_id),
+        )
+
+
+def parse_iso_date(value: str):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def vehicle_alert(vehicle, today: Optional[date] = None):
+    today = today or app_today()
+    if not vehicle:
+        return {"level": "", "oil_message": "車両未登録", "inspection_message": "車検未設定", "oil_km": 0, "inspection_days": None}
+    last_odometer = int_value(row_value(vehicle, "last_odometer", 0))
+    oil_base = int_value(row_value(vehicle, "oil_change_odometer", 0))
+    oil_km = max(last_odometer - oil_base, 0) if oil_base else 0
+    oil_level = ""
+    if oil_base:
+        if oil_km >= 5000:
+            oil_level = "red"
+        elif oil_km >= 4500:
+            oil_level = "orange"
+        elif oil_km >= 4000:
+            oil_level = "yellow"
+    if oil_base:
+        remaining = max(5000 - oil_km, 0)
+        oil_message = "オイル交換時期です" if oil_km >= 5000 else f"オイル交換まであと{remaining}kmです"
+    else:
+        oil_message = "オイル交換距離未設定"
+
+    due_date = parse_iso_date(row_value(vehicle, "inspection_due", ""))
+    inspection_days = None
+    inspection_level = ""
+    inspection_message = "車検期限未設定"
+    if due_date:
+        inspection_days = (due_date - today).days
+        if inspection_days < 0:
+            inspection_level = "expired"
+            inspection_message = "車検期限切れ"
+        elif inspection_days <= 7:
+            inspection_level = "red"
+            inspection_message = f"車検期限まであと{inspection_days}日です"
+        elif inspection_days <= 14:
+            inspection_level = "orange"
+            inspection_message = f"車検期限まであと{inspection_days}日です"
+        elif inspection_days <= 30:
+            inspection_level = "yellow"
+            inspection_message = f"車検期限まであと{inspection_days}日です"
+        else:
+            inspection_message = f"車検期限: {due_date.isoformat()}"
+
+    level_order = {"": 0, "yellow": 1, "orange": 2, "red": 3, "expired": 4}
+    level = inspection_level if level_order.get(inspection_level, 0) >= level_order.get(oil_level, 0) else oil_level
+    return {
+        "level": level,
+        "oil_level": oil_level,
+        "inspection_level": inspection_level,
+        "oil_message": oil_message,
+        "inspection_message": inspection_message,
+        "oil_km": oil_km,
+        "inspection_days": inspection_days,
+        "tire_note": row_value(vehicle, "tire_note", ""),
+    }
+
+
+def holiday_deadline_alert(today: Optional[date] = None):
+    today = today or app_today()
+    if today.day > 25:
+        return {"level": "ended", "message": "今月分の休み希望締切は終了しました"}
+    if today.day >= 20:
+        return {"level": "near", "message": "休み希望の締切が近いです"}
+    return {"level": "", "message": ""}
+
+
+def holiday_submission_status(company_id: int, target_month: Optional[date] = None):
+    base = target_month or (app_today().replace(day=1) + timedelta(days=32)).replace(day=1)
+    start = base.replace(day=1)
+    end = (start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)) - timedelta(days=1)
+    member_count = query_one(
+        "SELECT COUNT(*) AS count FROM users WHERE role='member' AND active=1 AND COALESCE(purged,0)=0 AND company_id=?",
+        (company_id,),
+    )["count"]
+    submitted = query_one(
+        """SELECT COUNT(DISTINCT user_id) AS count FROM holiday_requests
+           WHERE company_id=? AND request_date BETWEEN ? AND ?""",
+        (company_id, start.isoformat(), end.isoformat()),
+    )["count"]
+    return {
+        "ym": start.strftime("%Y-%m"),
+        "member_count": member_count,
+        "submitted_count": submitted,
+        "missing_count": max(member_count - submitted, 0),
+        "deadline_alert": holiday_deadline_alert(),
+    }
+
+
+def home_flow_message(vehicle_alert_info, holiday_alert_info):
+    if vehicle_alert_info.get("inspection_level") == "expired":
+        return "車検期限切れです。管理者に確認してください"
+    if vehicle_alert_info.get("inspection_level") == "red":
+        return "車検期限が近いです"
+    if vehicle_alert_info.get("oil_km", 0) >= 5000:
+        return "オイル交換時期です"
+    if holiday_alert_info.get("level") == "near":
+        return holiday_alert_info["message"]
+    if holiday_alert_info.get("level") == "ended":
+        return holiday_alert_info["message"]
+    if vehicle_alert_info.get("tire_note"):
+        return "タイヤの減りを確認してください"
+    now = app_now()
+    if now.hour >= 17:
+        return "夜間配達はライト確認を忘れずに"
+    return "今日も無事故で頑張ってください！"
+
+
+def delivery_values(completed: int, transfer: int, night: int, pickup: int, large: int):
+    return {
+        "completed": max(completed, 0),
+        "transfer": max(transfer, 0),
+        "night": max(night, 0),
+        "pickup": max(pickup, 0),
+        "large": max(large, 0),
+    }
+
+
+def delivery_changed(existing, values):
+    if not existing:
+        return False
+    return any(int_value(existing[key]) != int_value(values[key]) for key in ("completed", "transfer", "night", "pickup", "large"))
+
+
+def insert_delivery_correction(conn, company_id: int, delivery_id: int, user_id: int, actor_id: int, work_date: str, before, after, source: str):
+    if not before or not delivery_changed(before, after):
+        return
+    conn.execute(
+        """INSERT INTO delivery_corrections(company_id, delivery_id, user_id, actor_id, work_date,
+           before_completed, before_transfer, before_night, before_pickup, before_large,
+           after_completed, after_transfer, after_night, after_pickup, after_large, source, changed_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            company_id,
+            delivery_id,
+            user_id,
+            actor_id,
+            work_date,
+            int_value(before["completed"]),
+            int_value(before["transfer"]),
+            int_value(before["night"]),
+            int_value(before["pickup"]),
+            int_value(before["large"]),
+            int_value(after["completed"]),
+            int_value(after["transfer"]),
+            int_value(after["night"]),
+            int_value(after["pickup"]),
+            int_value(after["large"]),
+            source,
+            app_now().isoformat(timespec="seconds"),
+        ),
+    )
+
+
+def upsert_delivery_counts(company_id: int, user_id: int, work_date: str, completed: int, transfer: int, night: int, pickup: int, large: int, vehicle_rental: str = "none", memo: str = "", inspection_sheet_path: str = "", actor_id: Optional[int] = None, source: str = "", vehicle_id: Optional[int] = None, vehicle_name: str = ""):
+    now = app_now().isoformat(timespec="seconds")
+    values = delivery_values(completed, transfer, night, pickup, large)
+    with db() as conn:
+        existing = conn.execute("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user_id, company_id, work_date)).fetchone()
+        conn.execute(
+            """INSERT INTO deliveries(company_id, user_id, work_date, completed, transfer, night, pickup, large, vehicle_rental, memo, inspection_sheet_path, created_at, updated_at, vehicle_id, vehicle_name)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(user_id, work_date) DO UPDATE SET completed=excluded.completed, transfer=excluded.transfer,
                night=excluded.night, pickup=excluded.pickup, large=excluded.large, vehicle_rental=excluded.vehicle_rental,
                memo=excluded.memo, inspection_sheet_path=COALESCE(NULLIF(excluded.inspection_sheet_path, ''), deliveries.inspection_sheet_path),
+               vehicle_id=COALESCE(excluded.vehicle_id, deliveries.vehicle_id),
+               vehicle_name=COALESCE(NULLIF(excluded.vehicle_name, ''), deliveries.vehicle_name),
                updated_at=excluded.updated_at, company_id=excluded.company_id""",
             (
                 company_id,
                 user_id,
                 work_date,
-                max(completed, 0),
-                max(transfer, 0),
-                max(night, 0),
-                max(pickup, 0),
-                max(large, 0),
+                values["completed"],
+                values["transfer"],
+                values["night"],
+                values["pickup"],
+                values["large"],
                 vehicle_rental,
                 memo,
                 inspection_sheet_path or "",
                 now,
                 now,
+                vehicle_id,
+                vehicle_name or "",
             ),
         )
         delivery = conn.execute("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user_id, company_id, work_date)).fetchone()
+        if existing and delivery:
+            insert_delivery_correction(conn, company_id, delivery["id"], user_id, actor_id or user_id, work_date, existing, values, source)
         conn.commit()
         return delivery
 
@@ -2030,6 +2385,14 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
         (today_s, company_id),
     )
     deliveries = attach_image_info(deliveries, "slip_path")
+    vehicle_alerts = []
+    for vehicle in vehicle_rows_for_company(company_id):
+        info = vehicle_alert(vehicle)
+        if info["level"]:
+            item = dict(vehicle)
+            item["alert"] = info
+            vehicle_alerts.append(item)
+    holiday_status = holiday_submission_status(company_id)
     return render(
         request,
         "company_admin_dashboard.html",
@@ -2040,6 +2403,8 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
             "logs": logs,
             "issues": issues,
             "deliveries": deliveries,
+            "vehicle_alerts": vehicle_alerts[:5],
+            "holiday_status": holiday_status,
         },
     )
 
@@ -2081,6 +2446,7 @@ def save_member(
             )
         else:
             execute("UPDATE users SET name=?, username=?, phone=?, vehicle=? WHERE id=? AND role='member' AND company_id=? AND COALESCE(purged,0)=0", (name, username, phone, vehicle, member_id, company_id))
+        ensure_vehicle_for_user(company_id, int(member_id), vehicle)
         return RedirectResponse("/admin/members?message=" + quote("メンバー情報を更新しました"), status_code=303)
     existing = query_one("SELECT * FROM users WHERE username=? AND COALESCE(purged,0)=0", (username,))
     if existing and row_value(existing, "role") == "member" and existing["active"] == 1:
@@ -2095,6 +2461,7 @@ def save_member(
             (company_id, name, username, hash_password(password or "member123"), "member", phone, vehicle, now),
         )
         execute("INSERT OR IGNORE INTO rates(user_id, company_id) VALUES (?, ?)", (cur.lastrowid, company_id))
+        ensure_vehicle_for_user(company_id, cur.lastrowid, vehicle)
     except DB_INTEGRITY_ERROR:
         return RedirectResponse(f"/admin/members?error={quote('ログインIDが重複しています。別のIDを入力してください')}", status_code=303)
     return RedirectResponse("/admin/members?message=" + quote("メンバーを追加しました"), status_code=303)
@@ -2620,6 +2987,129 @@ def save_vehicle_rates(daily_fee: int = Form(...), monthly_fee: int = Form(...),
     return RedirectResponse("/admin/vehicle-rates", status_code=303)
 
 
+@app.get("/admin/vehicles", response_class=HTMLResponse)
+def admin_vehicles_page(request: Request, user=Depends(require_admin)):
+    require_feature(user, "vehicle")
+    vehicles = []
+    for vehicle in vehicle_rows_for_company(company_id_for(user), include_inactive=True):
+        item = dict(vehicle)
+        item["alert"] = vehicle_alert(vehicle)
+        vehicles.append(item)
+    return render(request, "vehicles.html", {"vehicles": vehicles, "is_admin_view": True})
+
+
+@app.post("/admin/vehicles")
+def save_vehicle(
+    vehicle_id: str = Form(""),
+    name: str = Form(...),
+    plate_number: str = Form(""),
+    last_odometer: int = Form(0),
+    oil_change_odometer: int = Form(0),
+    oil_change_date: str = Form(""),
+    inspection_due: str = Form(""),
+    tire_note: str = Form(""),
+    active: Optional[str] = Form(None),
+    user=Depends(require_admin),
+):
+    require_feature(user, "vehicle")
+    company_id = company_id_for(user)
+    now = app_now().isoformat(timespec="seconds")
+    name = name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="車両名を入力してください")
+    active_value = 1 if active == "1" else 0
+    if vehicle_id:
+        execute(
+            """UPDATE vehicles
+               SET name=?, plate_number=?, last_odometer=?, oil_change_odometer=?, oil_change_date=?,
+                   inspection_due=?, tire_note=?, active=?, updated_at=?
+               WHERE id=? AND company_id=?""",
+            (
+                name,
+                plate_number,
+                max(last_odometer, 0),
+                max(oil_change_odometer, 0),
+                oil_change_date,
+                inspection_due,
+                tire_note,
+                active_value,
+                now,
+                vehicle_id,
+                company_id,
+            ),
+        )
+    else:
+        execute(
+            """INSERT INTO vehicles(company_id, name, plate_number, last_odometer, oil_change_odometer,
+               oil_change_date, inspection_due, tire_note, active, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(company_id, name) DO UPDATE SET plate_number=excluded.plate_number,
+               last_odometer=excluded.last_odometer, oil_change_odometer=excluded.oil_change_odometer,
+               oil_change_date=excluded.oil_change_date, inspection_due=excluded.inspection_due,
+               tire_note=excluded.tire_note, active=excluded.active, updated_at=excluded.updated_at""",
+            (
+                company_id,
+                name,
+                plate_number,
+                max(last_odometer, 0),
+                max(oil_change_odometer, 0),
+                oil_change_date,
+                inspection_due,
+                tire_note,
+                active_value,
+                now,
+                now,
+            ),
+        )
+    return RedirectResponse("/admin/vehicles", status_code=303)
+
+
+@app.get("/vehicles", response_class=HTMLResponse)
+def member_vehicles_page(request: Request, user=Depends(require_user)):
+    require_feature(user, "vehicle")
+    company_id = company_id_for(user)
+    vehicles = []
+    for vehicle in vehicle_rows_for_company(company_id):
+        item = dict(vehicle)
+        item["alert"] = vehicle_alert(vehicle)
+        vehicles.append(item)
+    return render(request, "vehicles.html", {"vehicles": vehicles, "is_admin_view": user["role"] == "admin"})
+
+
+@app.get("/mobile/vehicle", response_class=HTMLResponse)
+def mobile_vehicle_change_page(request: Request, user=Depends(require_user)):
+    require_feature(user, "vehicle")
+    if user["role"] == "admin":
+        return RedirectResponse("/admin/vehicles", status_code=303)
+    vehicles, selected_vehicle = selected_vehicle_context(user)
+    return render(request, "mobile_vehicle_change.html", {"vehicles": vehicles, "selected_vehicle": selected_vehicle})
+
+
+@app.post("/mobile/vehicle")
+def mobile_vehicle_change(vehicle_id: int = Form(...), user=Depends(require_user)):
+    require_feature(user, "vehicle")
+    if user["role"] == "admin":
+        raise HTTPException(status_code=403, detail="メンバーとしてログインしてください")
+    company_id = company_id_for(user)
+    vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=? AND active=1", (vehicle_id, company_id))
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="車両が見つかりません")
+    today_s = app_today().isoformat()
+    with db() as conn:
+        conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=? AND company_id=?", (vehicle["id"], vehicle["name"], user["id"], company_id))
+        conn.execute(
+            """UPDATE work_logs SET vehicle_id=?, vehicle_name=?
+               WHERE id IN (
+                   SELECT id FROM work_logs
+                   WHERE user_id=? AND company_id=? AND work_date=? AND log_type='start'
+                   ORDER BY logged_at DESC LIMIT 1
+               )""",
+            (vehicle["id"], vehicle_label(vehicle), user["id"], company_id, today_s),
+        )
+        conn.commit()
+    return RedirectResponse("/member", status_code=303)
+
+
 @app.get("/member", response_class=HTMLResponse)
 def member_home(request: Request, user=Depends(require_user)):
     if user["role"] == "admin":
@@ -2637,7 +3127,10 @@ def member_home(request: Request, user=Depends(require_user)):
     next_shifts = [item for item in shifts if item["shift_date"] != today_s][:2]
     comment = auto_comment(delivery, reward, bool(today_shift))
     work_state = today_work_state(user["id"], company_id, today_s)
-    last_odometer = latest_odometer_for_user(user["id"], company_id)
+    vehicles, selected_vehicle = selected_vehicle_context(user)
+    selected_vehicle_alert = vehicle_alert(selected_vehicle)
+    holiday_alert = holiday_deadline_alert(now_dt.date())
+    last_odometer = latest_vehicle_odometer(company_id, row_value(selected_vehicle, "id")) or latest_odometer_for_user(user["id"], company_id)
     return render(
         request,
         "member_home.html",
@@ -2653,9 +3146,14 @@ def member_home(request: Request, user=Depends(require_user)):
             "last_odometer": last_odometer,
             "today_label": f"{now_dt.year}年 {now_dt.month}月{now_dt.day}日",
             "current_time": now_dt.strftime("%H:%M"),
-            "vehicle_name": row_value(user, "vehicle", "") or "車両未登録",
-            "oil_change_date": row_value(user, "oil_change_date", "") or "未設定",
-            "vehicle_inspection_due": row_value(user, "vehicle_inspection_due", "") or "未設定",
+            "flow_message": home_flow_message(selected_vehicle_alert, holiday_alert),
+            "vehicle_name": vehicle_label(selected_vehicle),
+            "vehicle_alert": selected_vehicle_alert,
+            "holiday_alert": holiday_alert,
+            "oil_change_date": row_value(selected_vehicle, "oil_change_date", "") or row_value(user, "oil_change_date", "") or "未設定",
+            "vehicle_inspection_due": row_value(selected_vehicle, "inspection_due", "") or row_value(user, "vehicle_inspection_due", "") or "未設定",
+            "vehicles": vehicles,
+            "selected_vehicle": selected_vehicle,
         },
     )
 
@@ -2669,6 +3167,7 @@ def work_log_page(request: Request, type: str = "start", user=Depends(require_us
         "SELECT * FROM work_logs WHERE user_id=? AND company_id=? ORDER BY logged_at DESC LIMIT 20",
         (user["id"], company_id_for(user)),
     )
+    vehicles, selected_vehicle = selected_vehicle_context(user)
     return render(
         request,
         "work_log.html",
@@ -2677,6 +3176,8 @@ def work_log_page(request: Request, type: str = "start", user=Depends(require_us
             "log_type": log_type,
             "work_date": now.date().isoformat(),
             "logged_at": now.strftime("%Y-%m-%dT%H:%M"),
+            "vehicles": vehicles,
+            "selected_vehicle": selected_vehicle,
         },
     )
 
@@ -2686,6 +3187,7 @@ def save_work_log(
     work_date: str = Form(...),
     log_type: str = Form(...),
     logged_at: str = Form(...),
+    vehicle_id: int = Form(0),
     odometer: int = Form(0),
     alcohol_result: str = Form(...),
     detector_used: str = Form(...),
@@ -2699,12 +3201,21 @@ def save_work_log(
     user=Depends(require_user),
 ):
     require_feature(user, "safety")
-    execute(
-        """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, alcohol_result, detector_used,
-           intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at, odometer)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (company_id_for(user), user["id"], work_date, log_type, logged_at, alcohol_result, detector_used, intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, app_now().isoformat(timespec="seconds"), max(odometer, 0)),
-    )
+    company_id = company_id_for(user)
+    vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=? AND active=1", (vehicle_id, company_id)) if vehicle_id else None
+    vehicle_name = vehicle_label(vehicle) if vehicle else ""
+    now = app_now().isoformat(timespec="seconds")
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, vehicle_id, vehicle_name, alcohol_result, detector_used,
+               intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at, odometer)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (company_id, user["id"], work_date, log_type, logged_at, vehicle["id"] if vehicle else None, vehicle_name, alcohol_result, detector_used, intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, now, max(odometer, 0)),
+        )
+        if vehicle:
+            conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=?", (vehicle["id"], vehicle["name"], user["id"]))
+        update_vehicle_odometer(conn, company_id, vehicle["id"] if vehicle else None, vehicle_name, odometer, now)
+        conn.commit()
     return RedirectResponse("/work-log", status_code=303)
 
 
@@ -2719,14 +3230,17 @@ def mobile_work_start_page(request: Request, user=Depends(require_user)):
     if state["status"] != "not_started":
         return RedirectResponse("/member", status_code=303)
     now_dt = app_now()
+    vehicles, selected_vehicle = selected_vehicle_context(user)
     return render(
         request,
         "mobile_work_start.html",
         {
             "work_date": today_s,
             "logged_at": now_dt.strftime("%Y-%m-%dT%H:%M"),
-            "last_odometer": latest_odometer_for_user(user["id"], company_id),
-            "vehicle_name": row_value(user, "vehicle", "") or "車両未登録",
+            "last_odometer": latest_vehicle_odometer(company_id, row_value(selected_vehicle, "id")) or latest_odometer_for_user(user["id"], company_id),
+            "vehicle_name": vehicle_label(selected_vehicle),
+            "vehicles": vehicles,
+            "selected_vehicle": selected_vehicle,
         },
     )
 
@@ -2735,6 +3249,7 @@ def mobile_work_start_page(request: Request, user=Depends(require_user)):
 def mobile_work_start(
     work_date: str = Form(...),
     logged_at: str = Form(""),
+    vehicle_id: int = Form(0),
     odometer: int = Form(0),
     alcohol_result: str = Form("0.00"),
     detector_used: str = Form("有"),
@@ -2749,32 +3264,42 @@ def mobile_work_start(
     state = today_work_state(user["id"], company_id, work_date)
     if state["status"] != "not_started":
         return RedirectResponse("/member", status_code=303)
+    vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=? AND active=1", (vehicle_id, company_id)) if vehicle_id else None
+    vehicle_name = vehicle_label(vehicle) if vehicle else (row_value(user, "vehicle", "") or "")
     logged_at = logged_at or app_now().strftime("%Y-%m-%dT%H:%M")
-    vehicle_note = f"車両: {row_value(user, 'vehicle', '') or '未登録'}"
+    vehicle_note = f"車両: {vehicle_name or '未登録'}"
     notes = " / ".join(part for part in [vehicle_note, notes.strip()] if part)
-    execute(
-        """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, odometer, alcohol_result, detector_used,
-           intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (
-            company_id,
-            user["id"],
-            work_date,
-            "start",
-            logged_at,
-            max(odometer, 0),
-            alcohol_result or "OK",
-            detector_used,
-            "無",
-            health_status or "良好",
-            "問題なし",
-            "問題なし",
-            "問題なし",
-            "",
-            notes,
-            app_now().isoformat(timespec="seconds"),
-        ),
-    )
+    now = app_now().isoformat(timespec="seconds")
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, vehicle_id, vehicle_name, odometer, alcohol_result, detector_used,
+               intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                company_id,
+                user["id"],
+                work_date,
+                "start",
+                logged_at,
+                vehicle["id"] if vehicle else None,
+                vehicle_name,
+                max(odometer, 0),
+                alcohol_result or "OK",
+                detector_used,
+                "無",
+                health_status or "良好",
+                "問題なし",
+                "問題なし",
+                "問題なし",
+                "",
+                notes,
+                now,
+            ),
+        )
+        if vehicle:
+            conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=?", (vehicle["id"], vehicle["name"], user["id"]))
+        update_vehicle_odometer(conn, company_id, vehicle["id"] if vehicle else None, vehicle_name, odometer, now)
+        conn.commit()
     return RedirectResponse("/member?message=start", status_code=303)
 
 
@@ -2817,15 +3342,18 @@ def mobile_work_end_page(request: Request, user=Depends(require_user)):
         "large": delivery["large"] if delivery else 0,
     }
     now_dt = app_now()
+    vehicles, selected_vehicle = selected_vehicle_context(user)
     return render(
         request,
         "mobile_work_end.html",
         {
             "work_date": today_s,
             "logged_at": now_dt.strftime("%Y-%m-%dT%H:%M"),
-            "last_odometer": latest_odometer_for_user(user["id"], company_id),
+            "last_odometer": latest_vehicle_odometer(company_id, row_value(selected_vehicle, "id")) or latest_odometer_for_user(user["id"], company_id),
             "counts": counts,
             "ocr_result": ocr_result,
+            "vehicles": vehicles,
+            "selected_vehicle": selected_vehicle,
         },
     )
 
@@ -2835,6 +3363,7 @@ async def mobile_work_end_preview(
     request: Request,
     work_date: str = Form(...),
     logged_at: str = Form(""),
+    vehicle_id: int = Form(0),
     odometer: int = Form(0),
     alcohol_result: str = Form("0.00"),
     detector_used: str = Form("有"),
@@ -2901,6 +3430,7 @@ async def mobile_work_end_preview(
             "work_date": work_date,
             "log_date": log_date,
             "logged_at": logged_at or app_now().strftime("%Y-%m-%dT%H:%M"),
+            "vehicle_id": vehicle_id,
             "odometer": max(odometer, 0),
             "alcohol_result": alcohol_result or "OK",
             "detector_used": detector_used,
@@ -2920,6 +3450,7 @@ def mobile_work_end_save(
     work_date: str = Form(...),
     log_date: str = Form(""),
     logged_at: str = Form(""),
+    vehicle_id: int = Form(0),
     odometer: int = Form(0),
     alcohol_result: str = Form("0.00"),
     detector_used: str = Form("有"),
@@ -2939,6 +3470,8 @@ def mobile_work_end_save(
     if user["role"] == "admin":
         raise HTTPException(status_code=403, detail="メンバーとしてログインしてください")
     company_id = company_id_for(user)
+    vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=? AND active=1", (vehicle_id, company_id)) if vehicle_id else None
+    vehicle_name = vehicle_label(vehicle) if vehicle else ""
     delivery = upsert_delivery_counts(
         company_id,
         user["id"],
@@ -2951,35 +3484,47 @@ def mobile_work_end_save(
         "none",
         notes or "スマホ退勤フローから登録",
         image_path,
+        user["id"],
+        "スマホ退勤フロー",
+        vehicle["id"] if vehicle else None,
+        vehicle_name,
     )
     if image_path:
         save_inspection_slip_record(company_id, user["id"], delivery["id"], work_date, image_path, original_filename, content_type)
     log_work_date = log_date or app_today().isoformat()
     state = today_work_state(user["id"], company_id, log_work_date)
     if state["status"] != "finished":
-        execute(
-            """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, odometer, alcohol_result, detector_used,
-               intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                company_id,
-                user["id"],
-                log_work_date,
-                "end",
-                logged_at or app_now().strftime("%Y-%m-%dT%H:%M"),
-                max(odometer, 0),
-                alcohol_result or "OK",
-                detector_used,
-                "無",
-                "良好",
-                "問題なし",
-                "問題なし",
-                "問題なし",
-                "",
-                notes,
-                app_now().isoformat(timespec="seconds"),
-            ),
-        )
+        now = app_now().isoformat(timespec="seconds")
+        with db() as conn:
+            conn.execute(
+                """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, vehicle_id, vehicle_name, odometer, alcohol_result, detector_used,
+                   intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    company_id,
+                    user["id"],
+                    log_work_date,
+                    "end",
+                    logged_at or app_now().strftime("%Y-%m-%dT%H:%M"),
+                    vehicle["id"] if vehicle else None,
+                    vehicle_name,
+                    max(odometer, 0),
+                    alcohol_result or "OK",
+                    detector_used,
+                    "無",
+                    "良好",
+                    "問題なし",
+                    "問題なし",
+                    "問題なし",
+                    "",
+                    notes,
+                    now,
+                ),
+            )
+            if vehicle:
+                conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=?", (vehicle["id"], vehicle["name"], user["id"]))
+            update_vehicle_odometer(conn, company_id, vehicle["id"] if vehicle else None, vehicle_name, odometer, now)
+            conn.commit()
     return RedirectResponse(f"/mobile/work/end/complete?day={work_date}", status_code=303)
 
 
@@ -3004,7 +3549,8 @@ def delivery_page(request: Request, day: Optional[str] = None, user=Depends(requ
     if user["role"] == "admin":
         company_id = company_id_for(user)
         rows = query_all(
-            """SELECT d.*, u.name, COALESCE(s.file_path, d.inspection_sheet_path) AS slip_path
+            """SELECT d.*, u.name, COALESCE(s.file_path, d.inspection_sheet_path) AS slip_path,
+                      (SELECT COUNT(*) FROM delivery_corrections c WHERE c.delivery_id=d.id) AS correction_count
                FROM deliveries d
                JOIN users u ON u.id=d.user_id
                LEFT JOIN inspection_slips s ON s.delivery_id=d.id
@@ -3012,7 +3558,16 @@ def delivery_page(request: Request, day: Optional[str] = None, user=Depends(requ
             (target, company_id),
         )
         rows = attach_image_info(rows, "slip_path")
-        return render(request, "admin_deliveries.html", {"rows": rows, "target": target})
+        corrections = query_all(
+            """SELECT c.*, u.name AS member_name, a.name AS actor_name
+               FROM delivery_corrections c
+               JOIN users u ON u.id=c.user_id
+               JOIN users a ON a.id=c.actor_id
+               WHERE c.company_id=? AND c.work_date=?
+               ORDER BY c.changed_at DESC LIMIT 50""",
+            (company_id, target),
+        )
+        return render(request, "admin_deliveries.html", {"rows": rows, "target": target, "corrections": corrections})
     company_id = company_id_for(user)
     delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user["id"], company_id, target))
     slip = query_one("SELECT * FROM inspection_slips WHERE user_id=? AND company_id=? AND slip_date=?", (user["id"], company_id, target))
@@ -3028,6 +3583,13 @@ def delivery_page(request: Request, day: Optional[str] = None, user=Depends(requ
     elif sheet:
         inspection_image_path = sheet["file_path"]
     inspection_image = inspection_image_info(inspection_image_path)
+    corrections = query_all(
+        """SELECT c.*, a.name AS actor_name FROM delivery_corrections c
+           JOIN users a ON a.id=c.actor_id
+           WHERE c.user_id=? AND c.company_id=? AND c.work_date=?
+           ORDER BY c.changed_at DESC LIMIT 20""",
+        (user["id"], company_id, target),
+    )
     return render(
         request,
         "deliveries.html",
@@ -3040,6 +3602,7 @@ def delivery_page(request: Request, day: Optional[str] = None, user=Depends(requ
             "target": target,
             "reward": reward,
             "comment": auto_comment(delivery, reward),
+            "corrections": corrections,
         },
     )
 
@@ -3063,17 +3626,24 @@ async def save_delivery(
     now_dt = app_now()
     now = now_dt.isoformat(timespec="seconds")
     company_id = company_id_for(user)
-    with db() as conn:
-        conn.execute(
-            """INSERT INTO deliveries(company_id, user_id, work_date, completed, transfer, night, pickup, large, vehicle_rental, memo, inspection_sheet_path, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(user_id, work_date) DO UPDATE SET completed=excluded.completed, transfer=excluded.transfer,
-               night=excluded.night, pickup=excluded.pickup, large=excluded.large, vehicle_rental=excluded.vehicle_rental,
-               memo=excluded.memo, updated_at=excluded.updated_at, company_id=excluded.company_id""",
-            (company_id, user["id"], work_date, completed, transfer, night, pickup, large, vehicle_rental, memo, "", now, now),
-        )
-        delivery = conn.execute("SELECT id FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user["id"], company_id, work_date)).fetchone()
-        conn.commit()
+    selected_vehicle = vehicle_for_user(user, company_id)
+    delivery = upsert_delivery_counts(
+        company_id,
+        user["id"],
+        work_date,
+        completed,
+        transfer,
+        night,
+        pickup,
+        large,
+        vehicle_rental,
+        memo,
+        "",
+        user["id"],
+        "配達入力",
+        row_value(selected_vehicle, "id"),
+        vehicle_label(selected_vehicle) if selected_vehicle else "",
+    )
     if inspection_image and inspection_image.filename:
         if not inspection_image.content_type or not inspection_image.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="点検表は画像ファイルを選択してください")
@@ -3100,6 +3670,23 @@ async def save_delivery(
                 conn.execute("UPDATE deliveries SET inspection_sheet_path=?, updated_at=? WHERE id=? AND company_id=?", (public_path, now, delivery["id"], company_id))
                 conn.commit()
     return RedirectResponse(f"/deliveries?day={work_date}", status_code=303)
+
+
+@app.get("/admin/delivery-corrections", response_class=HTMLResponse)
+def delivery_corrections_page(request: Request, day: Optional[str] = None, user=Depends(require_admin)):
+    require_feature(user, "deliveries")
+    company_id = company_id_for(user)
+    target = day or app_today().isoformat()
+    rows = query_all(
+        """SELECT c.*, u.name AS member_name, a.name AS actor_name
+           FROM delivery_corrections c
+           JOIN users u ON u.id=c.user_id
+           JOIN users a ON a.id=c.actor_id
+           WHERE c.company_id=? AND c.work_date=?
+           ORDER BY c.changed_at DESC LIMIT 200""",
+        (company_id, target),
+    )
+    return render(request, "delivery_corrections.html", {"rows": rows, "target": target})
 
 
 @app.get("/inspection-sheets", response_class=HTMLResponse)
@@ -3223,11 +3810,11 @@ def inspection_sheet_for_user(sheet_id: int, user):
 def inspection_sheet_correct_page(request: Request, sheet_id: int, user=Depends(require_user)):
     require_feature(user, "inspection")
     sheet = with_image_info(inspection_sheet_for_user(sheet_id, user))
-    extracted_fields = extract_inspection_fields(sheet.get("ocr_text", "") or "", fallback_date=sheet.get("delivery_date") or sheet["sheet_date"])
-    target_date = sheet.get("delivery_date") or extracted_fields["work_date"] or sheet["sheet_date"]
+    extracted_fields = extract_inspection_fields(row_value(sheet, "ocr_text", "") or "", fallback_date=row_value(sheet, "delivery_date", "") or sheet["sheet_date"])
+    target_date = row_value(sheet, "delivery_date", "") or extracted_fields["work_date"] or sheet["sheet_date"]
     delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (sheet["user_id"], row_value(sheet, "company_id", company_id_for(user)), target_date))
-    ocr_completed = sheet.get("ocr_completed") or extracted_fields["completed"]
-    ocr_pickup = sheet.get("ocr_pickup") or extracted_fields["pickup"]
+    ocr_completed = row_value(sheet, "ocr_completed", 0) or extracted_fields["completed"]
+    ocr_pickup = row_value(sheet, "ocr_pickup", 0) or extracted_fields["pickup"]
     counts = {
         "completed": ocr_completed or (delivery["completed"] if delivery else 0),
         "transfer": delivery["transfer"] if delivery else 0,
@@ -3239,9 +3826,9 @@ def inspection_sheet_correct_page(request: Request, sheet_id: int, user=Depends(
         "work_date": target_date,
         "completed": ocr_completed,
         "pickup": ocr_pickup,
-        "acceptance": sheet.get("ocr_acceptance") or extracted_fields["acceptance"],
-        "received": sheet.get("ocr_received") or extracted_fields["received"],
-        "raw_text": (sheet.get("ocr_text") or "").strip(),
+        "acceptance": row_value(sheet, "ocr_acceptance", 0) or extracted_fields["acceptance"],
+        "received": row_value(sheet, "ocr_received", 0) or extracted_fields["received"],
+        "raw_text": (row_value(sheet, "ocr_text", "") or "").strip(),
     }
     return render(
         request,
@@ -3280,29 +3867,22 @@ def apply_inspection_sheet_counts(
         "pickup": max(pickup, 0),
         "large": max(large, 0),
     }
+    upsert_delivery_counts(
+        company_id,
+        sheet["user_id"],
+        target_date,
+        values["completed"],
+        values["transfer"],
+        values["night"],
+        values["pickup"],
+        values["large"],
+        vehicle_rental,
+        memo,
+        sheet["file_path"],
+        user["id"],
+        "点検表OCR補正",
+    )
     with db() as conn:
-        conn.execute(
-            """INSERT INTO deliveries(company_id, user_id, work_date, completed, transfer, night, pickup, large, vehicle_rental, memo, inspection_sheet_path, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(user_id, work_date) DO UPDATE SET completed=excluded.completed,
-               transfer=excluded.transfer, night=excluded.night, pickup=excluded.pickup, large=excluded.large,
-               inspection_sheet_path=excluded.inspection_sheet_path, updated_at=excluded.updated_at, company_id=excluded.company_id""",
-            (
-                company_id,
-                sheet["user_id"],
-                target_date,
-                values["completed"],
-                values["transfer"],
-                values["night"],
-                values["pickup"],
-                values["large"],
-                vehicle_rental,
-                memo,
-                sheet["file_path"],
-                now,
-                now,
-            ),
-        )
         conn.execute(
             """UPDATE inspection_sheets
                SET delivery_date=?, ocr_status=?, ocr_completed=?, ocr_pickup=?, ocr_acceptance=?
@@ -3450,6 +4030,8 @@ def holidays_page(request: Request, user=Depends(require_user)):
             "days": calendar_days_for_month(start),
             "rows_by_date": rows_by_date,
             "holiday_dates": {d.isoformat() for d in holiday_days},
+            "holiday_alert": holiday_deadline_alert(),
+            "holiday_status": holiday_submission_status(company_id_for(user), start) if user["role"] == "admin" else None,
         },
     )
 
@@ -3511,6 +4093,7 @@ def shifts_page(request: Request, ym: Optional[str] = None, message: str = "", u
                 "towns": active_towns(),
                 "shifts_by_date": shifts_by_date(shifts),
                 "message": message,
+                "holiday_status": holiday_submission_status(company_id, start),
             },
         )
     shifts = query_all(

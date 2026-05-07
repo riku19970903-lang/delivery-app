@@ -1,6 +1,22 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>配達個数一覧</h1>
-<form class="toolbar"><label>日付<input type="date" name="day" value="{{ target }}"></label><button>表示</button></form>
+<form class="toolbar"><label>日付<input type="date" name="day" value="{{ target }}"></label><button>表示</button><a class="button" href="/admin/delivery-corrections?day={{ target }}">修正履歴を見る</a></form>
 <section class="panel">{% include "parts_delivery_table.html" %}</section>
+{% if corrections %}
+<section class="panel tablewrap">
+  <h2>この日の修正履歴</h2>
+  <table>
+    <tr><th>日時</th><th>メンバー</th><th>修正者</th><th>修正前</th><th>修正後</th><th>経路</th></tr>
+    {% for c in corrections %}
+    <tr>
+      <td>{{ c.changed_at }}</td><td>{{ c.member_name }}</td><td>{{ c.actor_name }}</td>
+      <td>完了{{ c.before_completed }} / 転送{{ c.before_transfer }} / 夜間{{ c.before_night }} / 集荷{{ c.before_pickup }} / 大型{{ c.before_large }}</td>
+      <td>完了{{ c.after_completed }} / 転送{{ c.after_transfer }} / 夜間{{ c.after_night }} / 集荷{{ c.after_pickup }} / 大型{{ c.after_large }}</td>
+      <td>{{ c.source }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</section>
+{% endif %}
 {% endblock %}

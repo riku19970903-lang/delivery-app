@@ -3,12 +3,24 @@
 <section class="flow-mobile">
   <div class="flow-hero">
     <p class="flow-eyebrow">SPARKLE DRIVE</p>
-    <h1>今日も無事故で気をつけて頑張ってください！</h1>
+    <h1>{{ flow_message }}</h1>
     <div class="flow-meta">
       <span>{{ today_label }}</span>
       <span>{{ current_time }}</span>
       <b class="flow-status {{ work_state.status }}">{{ work_state.label }}</b>
     </div>
+  </div>
+
+  <div class="flow-alert-stack">
+    {% if vehicle_alert.inspection_level %}
+    <div class="flow-alert {{ vehicle_alert.inspection_level }}">{{ vehicle_alert.inspection_message }}</div>
+    {% endif %}
+    {% if vehicle_alert.oil_level %}
+    <div class="flow-alert {{ vehicle_alert.oil_level }}">{{ vehicle_alert.oil_message }}</div>
+    {% endif %}
+    {% if holiday_alert.message %}
+    <div class="flow-alert {{ holiday_alert.level }}">{{ holiday_alert.message }}</div>
+    {% endif %}
   </div>
 
   {% if feature_enabled('safety') %}
@@ -66,7 +78,7 @@
     <div class="flow-mini-grid">
       {% if feature_enabled('rewards') %}<a class="flow-mini-button" href="/rewards"><span>売</span><b>今月の売上</b></a>{% endif %}
       {% if feature_enabled('shifts') %}<a class="flow-mini-button" href="/member/shifts"><span>シ</span><b>シフト確認</b></a>{% endif %}
-      <div class="flow-mini-button info"><span>車</span><b>車両情報</b><small>{{ vehicle_name }}</small></div>
+      {% if feature_enabled('vehicle') %}<a class="flow-mini-button" href="/mobile/vehicle"><span>車</span><b>車両変更</b><small>{{ vehicle_name }}</small></a>{% endif %}
       <div class="flow-mini-button info"><span>油</span><b>オイル交換日</b><small>{{ oil_change_date }}</small></div>
       <div class="flow-mini-button info"><span>検</span><b>車検期限</b><small>{{ vehicle_inspection_due }}</small></div>
       {% if feature_enabled('issues') %}<a class="flow-mini-button" href="/vehicle-issues"><span>不</span><b>不具合報告</b></a>{% endif %}

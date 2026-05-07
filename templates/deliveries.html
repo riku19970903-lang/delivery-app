@@ -28,6 +28,22 @@
   <button class="primary">保存して報酬を見る</button>
 </form>
 <section class="comment">日別報酬見込み: <b>{{ "{:,}".format(reward) }}円</b><br>{{ comment }}</section>
+{% if corrections %}
+<section class="panel tablewrap">
+  <h2>修正履歴</h2>
+  <table>
+    <tr><th>日時</th><th>修正者</th><th>修正前</th><th>修正後</th></tr>
+    {% for c in corrections %}
+    <tr>
+      <td>{{ c.changed_at }}</td>
+      <td>{{ c.actor_name }}</td>
+      <td>完了{{ c.before_completed }} / 転送{{ c.before_transfer }} / 夜間{{ c.before_night }} / 集荷{{ c.before_pickup }} / 大型{{ c.before_large }}</td>
+      <td>完了{{ c.after_completed }} / 転送{{ c.after_transfer }} / 夜間{{ c.after_night }} / 集荷{{ c.after_pickup }} / 大型{{ c.after_large }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</section>
+{% endif %}
 <script>
   const imageInput = document.getElementById("inspection-image");
   const preview = document.getElementById("inspection-preview");

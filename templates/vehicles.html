@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>車両管理</h1>
+
+{% if is_admin_view %}
+<section class="panel formgrid">
+  <h2>車両を追加</h2>
+  <form method="post" action="/admin/vehicles" class="formgrid wide-field">
+    <label>車両名<input name="name" required placeholder="例: 軽バン 12-34"></label>
+    <label>ナンバー<input name="plate_number" placeholder="任意"></label>
+    <label>現在走行距離<input type="number" name="last_odometer" value="0" min="0"></label>
+    <label>前回オイル交換距離<input type="number" name="oil_change_odometer" value="0" min="0"></label>
+    <label>オイル交換日<input type="date" name="oil_change_date"></label>
+    <label>車検期限<input type="date" name="inspection_due"></label>
+    <label>タイヤメモ<input name="tire_note" placeholder="例: 前輪要確認"></label>
+    <label class="check"><input type="checkbox" name="active" value="1" checked> 利用中</label>
+    <button class="primary">保存</button>
+  </form>
+</section>
+{% endif %}
+
+<section class="panel tablewrap">
+  <h2>車両一覧</h2>
+  <table>
+    <tr><th>車両</th><th>走行距離</th><th>オイル</th><th>車検</th><th>タイヤ</th><th>状態</th>{% if is_admin_view %}<th>編集</th>{% endif %}</tr>
+    {% for v in vehicles %}
+    <tr>
+      <td><b>{{ v.name }}</b>{% if v.plate_number %}<br><span class="hint">{{ v.plate_number }}</span>{% endif %}</td>
+      <td>{{ "{:,}".format(v.last_odometer or 0) }}km</td>
+      <td><span class="vehicle-alert {{ v.alert.oil_level }}">{{ v.alert.oil_message }}</span><br><span class="hint">前回 {{ "{:,}".format(v.oil_change_odometer or 0) }}km</span></td>
+      <td><span class="vehicle-alert {{ v.alert.inspection_level }}">{{ v.alert.inspection_message }}</span></td>
+      <td>{{ v.tire_note or "未登録" }}</td>
+      <td>{{ "利用中" if v.active else "停止中" }}</td>
+      {% if is_admin_view %}
+      <td>
+        <form method="post" action="/admin/vehicles" class="mini-form vehicle-edit-form">
+          <input type="hidden" name="vehicle_id" value="{{ v.id }}">
+          <input name="name" value="{{ v.name }}" required>
+          <input name="plate_number" value="{{ v.plate_number }}">
+          <input type="number" name="last_odometer" value="{{ v.last_odometer or 0 }}" min="0">
+          <input type="number" name="oil_change_odometer" value="{{ v.oil_change_odometer or 0 }}" min="0">
+          <input type="date" name="oil_change_date" value="{{ v.oil_change_date }}">
+          <input type="date" name="inspection_due" value="{{ v.inspection_due }}">
+          <input name="tire_note" value="{{ v.tire_note }}">
+          <label class="check"><input type="checkbox" name="active" value="1" {% if v.active %}checked{% endif %}> 利用中</label>
+          <button>更新</button>
+        </form>
+      </td>
+      {% endif %}
+    </tr>
+    {% else %}
+    <tr><td colspan="{{ 7 if is_admin_view else 6 }}">車両が未登録です。</td></tr>
+    {% endfor %}
+  </table>
+</section>
+{% endblock %}

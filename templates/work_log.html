@@ -15,6 +15,18 @@
       <option value="end" {% if log_type == "end" %}selected{% endif %}>退勤</option>
     </select>
   </label>
+  <label>車両
+    {% if vehicles %}
+    <select name="vehicle_id">
+      {% for vehicle in vehicles %}
+      <option value="{{ vehicle.id }}" {% if selected_vehicle and vehicle.id == selected_vehicle.id %}selected{% endif %}>{{ vehicle.name }}{% if vehicle.plate_number %}（{{ vehicle.plate_number }}）{% endif %}</option>
+      {% endfor %}
+    </select>
+    {% else %}
+    <input type="hidden" name="vehicle_id" value="0">
+    <span class="hint">車両未登録</span>
+    {% endif %}
+  </label>
   <label>日時<input type="datetime-local" name="logged_at" value="{{ logged_at }}" required></label>
   <label>走行距離<input type="number" name="odometer" value="0" min="0" inputmode="numeric"></label>
   <label>アルコールチェック結果<input name="alcohol_result" placeholder="例: 0.00mg/L" required></label>

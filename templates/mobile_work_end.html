@@ -12,7 +12,19 @@
 
     <div class="flow-step active" data-step="1">
       <span class="step-count">STEP 1 / 4</span>
-      <h2>終了走行距離</h2>
+      <h2>車両と終了走行距離</h2>
+      {% if vehicles %}
+      <label>本日使った車両
+        <select name="vehicle_id">
+          {% for vehicle in vehicles %}
+          <option value="{{ vehicle.id }}" {% if selected_vehicle and vehicle.id == selected_vehicle.id %}selected{% endif %}>{{ vehicle.name }}{% if vehicle.plate_number %}（{{ vehicle.plate_number }}）{% endif %}</option>
+          {% endfor %}
+        </select>
+      </label>
+      {% else %}
+      <input type="hidden" name="vehicle_id" value="0">
+      <p class="alert">車両が未登録です。管理者に車両登録を依頼してください。</p>
+      {% endif %}
       <label>本日の終了走行距離
         <input type="number" name="odometer" value="{{ last_odometer if last_odometer else '' }}" min="0" inputmode="numeric" placeholder="例: 12580" required>
       </label>

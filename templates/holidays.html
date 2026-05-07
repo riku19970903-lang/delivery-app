@@ -1,6 +1,9 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>来月の休み希望{{ "一覧" if user.role == "admin" else "入力" }}</h1>
+{% if holiday_alert and holiday_alert.message %}
+<p class="alert">{{ holiday_alert.message }}</p>
+{% endif %}
 
 {% if user.role != 'admin' %}
 <form method="post" class="panel formgrid"><label>希望日<input type="date" name="request_date" required></label><label>理由・メモ<input name="reason"></label><button class="primary">希望を出す</button></form>
@@ -9,6 +12,12 @@
 </table></section>
 {% else %}
 <form class="toolbar"><label>対象年月<input type="month" name="ym" value="{{ ym }}"></label><button>表示</button></form>
+{% if holiday_status %}
+<section class="panel">
+  <h2>提出状況</h2>
+  <p>提出 {{ holiday_status.submitted_count }}名 / 未提出 {{ holiday_status.missing_count }}名 / 登録メンバー {{ holiday_status.member_count }}名</p>
+</section>
+{% endif %}
 <section class="panel">
   <div class="holiday-calendar">
     {% for day in days %}

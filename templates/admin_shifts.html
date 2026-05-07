@@ -6,6 +6,13 @@
   <button>表示</button>
 </form>
 {% if message %}<p class="success">{{ message }}</p>{% endif %}
+{% if holiday_status %}
+<section class="panel">
+  <h2>休み希望提出状況</h2>
+  <p><b>{{ holiday_status.ym }}</b> 対象: 提出 {{ holiday_status.submitted_count }}名 / 未提出 {{ holiday_status.missing_count }}名 / 登録メンバー {{ holiday_status.member_count }}名</p>
+  {% if holiday_status.deadline_alert.message %}<p class="alert">{{ holiday_status.deadline_alert.message }}</p>{% endif %}
+</section>
+{% endif %}
 
 <section class="panel shift-import">
   <h2>シフト一括インポート</h2>
