@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ company_name or "SPARKLE DRIVE" }} 管理</h1>
+<section class="mobile-menu-panel">
+  <div class="mobile-menu-grid">
+    {% if feature_enabled('members') %}<a class="mobile-menu-item" href="/admin/members"><span>メ</span><b>メンバー</b></a>{% endif %}
+    {% if feature_enabled('shifts') %}<a class="mobile-menu-item" href="/admin/shifts"><span>シ</span><b>シフト</b></a>{% endif %}
+    {% if feature_enabled('inspection') %}<a class="mobile-menu-item" href="/inspection-sheets"><span>点</span><b>点検表</b></a>{% endif %}
+    {% if feature_enabled('deliveries') %}<a class="mobile-menu-item" href="/deliveries"><span>配</span><b>配達一覧</b></a>{% endif %}
+    {% if feature_enabled('rewards') %}<a class="mobile-menu-item" href="/rewards"><span>売</span><b>売上・報酬</b></a>{% endif %}
+    {% if feature_enabled('safety') %}<a class="mobile-menu-item" href="/admin/safety"><span>安</span><b>安全記録</b></a>{% endif %}
+    {% if feature_enabled('issues') %}<a class="mobile-menu-item" href="/vehicle-issues"><span>不</span><b>不具合</b></a>{% endif %}
+    <a class="mobile-menu-item" href="/support-requests"><span>要</span><b>要望送信</b></a>
+    <a class="mobile-menu-item" href="/admin/settings"><span>設</span><b>設定</b></a>
+  </div>
+</section>
+<div class="grid stats">
+  {% if feature_enabled('members') %}<div class="tile"><span>登録メンバー</span><strong>{{ member_count }}名</strong></div>{% endif %}
+  {% if feature_enabled('safety') %}<div class="tile"><span>本日の点呼記録</span><strong>{{ log_count }}件</strong></div>{% endif %}
+  {% if feature_enabled('deliveries') %}<div class="tile"><span>本日の配達入力</span><strong>{{ delivery_count }}件</strong></div>{% endif %}
+</div>
+<div class="grid two">
+  {% if feature_enabled('deliveries') %}<section class="panel"><h2>本日の配達個数</h2>{% include "parts_delivery_table.html" %}</section>{% endif %}
+  {% if feature_enabled('issues') %}<section class="panel"><h2>車両不具合 最新</h2>{% for i in issues %}<p class="rowline"><b>{{ i.name }}</b> {{ i.issue_date }} {{ i.severity }}<br>{{ i.detail }}</p>{% else %}<p>未登録です。</p>{% endfor %}</section>{% endif %}
+</div>
+{% endblock %}

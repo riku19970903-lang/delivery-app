@@ -14,11 +14,13 @@
     <label>管理者ログインID<input name="admin_username" required autocomplete="off"></label>
     <label>管理者パスワード<input name="admin_password" type="password" required autocomplete="new-password"></label>
     <label>状態
-      <select name="active">
-        <option value="1">利用中</option>
-        <option value="0">停止中</option>
+      <select name="status">
+        {% for s in company_statuses %}<option>{{ s }}</option>{% endfor %}
       </select>
     </label>
+    <label>契約開始日<input type="date" name="contract_start_date" value="{{ today }}"></label>
+    <label>次回更新日<input type="date" name="next_renewal_date"></label>
+    <label class="wide-field">メモ<textarea name="memo"></textarea></label>
     <button class="primary">会社を追加</button>
   </form>
 
@@ -30,11 +32,13 @@
     <label>管理者ログインID<input name="admin_username" value="{{ c.admin_username or '' }}" required autocomplete="off"></label>
     <label>管理者パスワード<input name="admin_password" type="password" placeholder="変更時だけ入力" autocomplete="new-password"></label>
     <label>状態
-      <select name="active">
-        <option value="1" {{ 'selected' if c.active else '' }}>利用中</option>
-        <option value="0" {{ '' if c.active else 'selected' }}>停止中</option>
+      <select name="status">
+        {% for s in company_statuses %}<option {{ 'selected' if (c.status or '利用中') == s else '' }}>{{ s }}</option>{% endfor %}
       </select>
     </label>
+    <label>契約開始日<input type="date" name="contract_start_date" value="{{ c.contract_start_date or '' }}"></label>
+    <label>次回更新日<input type="date" name="next_renewal_date" value="{{ c.next_renewal_date or '' }}"></label>
+    <label class="wide-field">メモ<textarea name="memo">{{ c.memo or '' }}</textarea></label>
     <button class="primary">保存</button>
   </form>
   {% else %}
@@ -45,7 +49,7 @@
 
 <section class="panel settings-panel" id="feature-plan">
   <h2>利用機能・プラン設定</h2>
-  <p class="hint">現在は課金予定・テスト中の設定です。実際の請求処理は行いません。</p>
+  <p class="hint">現在は課金予定・テスト中の設定です。実際の請求処理は行いません。現在の合計月額は {{ "{:,}".format(company_monthly_amount) }}円です。</p>
   {% if can_manage_companies %}
   <form method="get" action="/admin/settings" class="formgrid">
     <label>設定対象会社
@@ -60,6 +64,16 @@
   {% endif %}
   <form method="post" action="/admin/settings/features" onsubmit="return confirm('{{ feature_target_company.name if feature_target_company else company_name }} の利用機能を変更します。保存しますか？');">
     <input type="hidden" name="feature_company_id" value="{{ feature_target_id }}">
+    {% if platform_admin %}
+    <label>反映タイミング
+      <select name="immediate">
+        <option value="schedule">次回更新日から反映</option>
+        <option value="1">今すぐ反映</option>
+      </select>
+    </label>
+    {% else %}
+    <input type="hidden" name="immediate" value="schedule">
+    {% endif %}
     <div class="feature-grid">
       {% for f in feature_rows %}
       <label class="feature-card">
@@ -73,7 +87,46 @@
     </div>
     <button class="primary">利用機能を保存</button>
   </form>
+
+  <h3>次回更新で反映予定の機能変更</h3>
+  <div class="tablewrap">
+    <table>
+      <tr><th>反映予定日</th><th>機能</th><th>変更</th><th>依頼日時</th></tr>
+      {% for ch in pending_changes %}
+      <tr><td>{{ ch.effective_date }}</td><td>{{ ch.feature_label or ch.feature_key }}</td><td>{{ "有効" if ch.enabled else "無効" }}</td><td>{{ ch.created_at }}</td></tr>
+      {% else %}
+      <tr><td colspan="4">予定されている変更はありません。</td></tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% if platform_admin and pending_changes %}
+  <form method="post" action="/admin/settings/features/apply-pending" onsubmit="return confirm('予定変更を今すぐ反映しますか？');">
+    <input type="hidden" name="feature_company_id" value="{{ feature_target_id }}">
+    <button class="primary">予定変更を即時反映</button>
+  </form>
+  {% endif %}
 </section>
+
+{% if platform_admin %}
+<section class="panel settings-panel">
+  <h2>機能別 月額料金</h2>
+  <form method="post" action="/admin/feature-prices">
+    <div class="feature-grid">
+      {% for f in feature_prices %}
+      <div class="feature-card">
+        <input type="hidden" name="feature_key" value="{{ f.feature_key }}">
+        <span>
+          <b>{{ f.label }}</b>
+          <label>月額料金<input type="number" name="monthly_price" value="{{ f.monthly_price }}" min="0"></label>
+          <label>表示メモ<input name="note" value="{{ f.note or '' }}"></label>
+        </span>
+      </div>
+      {% endfor %}
+    </div>
+    <button class="primary">料金を保存</button>
+  </form>
+</section>
+{% endif %}
 
 <section class="panel settings-panel">
   <h2>管理者アカウント</h2>

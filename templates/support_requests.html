@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ "不具合・改善要望 管理" if platform_view else "不具合・改善要望を送る" }}</h1>
+{% if error %}<p class="alert">{{ error }}</p>{% endif %}
+{% if message %}<p class="success">{{ message }}</p>{% endif %}
+
+{% if not platform_view %}
+<section class="panel settings-panel">
+  <h2>送信フォーム</h2>
+  <form method="post" action="/support-requests" class="formgrid" enctype="multipart/form-data">
+    <label>種別
+      <select name="request_type">{% for t in support_types %}<option>{{ t }}</option>{% endfor %}</select>
+    </label>
+    <label>緊急度
+      <select name="urgency">{% for u in support_urgencies %}<option>{{ u }}</option>{% endfor %}</select>
+    </label>
+    <label>件名<input name="subject" required></label>
+    <label>画像添付<input type="file" name="image" accept="image/*"></label>
+    <label class="wide-field">内容<textarea name="body" required></textarea></label>
+    <button class="primary">送信する</button>
+  </form>
+</section>
+{% endif %}
+
+<section class="panel tablewrap">
+  <h2>{{ "全会社から届いた要望" if platform_view else "送信履歴" }}</h2>
+  <table>
+    <tr><th>日時</th>{% if platform_view %}<th>会社</th>{% endif %}<th>送信者</th><th>種別</th><th>緊急度</th><th>件名</th><th>内容</th><th>画像</th><th>状態</th><th>返信メモ</th></tr>
+    {% for r in requests %}
+    <tr>
+      <td>{{ r.created_at }}</td>
+      {% if platform_view %}<td>{{ r.company_name }}</td>{% endif %}
+      <td>{{ r.sender_name }}</td><td>{{ r.request_type }}</td><td>{{ r.urgency }}</td><td>{{ r.subject }}</td><td>{{ r.body }}</td>
+      <td>{% if r.image_path %}<a class="button mini-button" href="{{ r.image_view_url }}">確認</a>{% else %}<span class="hint">なし</span>{% endif %}</td>
+      <td>
+        {% if platform_view %}
+        <form method="post" action="/admin/support-requests/{{ r.id }}/update" class="mini-form">
+          <select name="status">{% for s in support_statuses %}<option {{ 'selected' if s == r.status else '' }}>{{ s }}</option>{% endfor %}</select>
+          <textarea name="reply_note" placeholder="返信メモ">{{ r.reply_note or '' }}</textarea>
+          <button>更新</button>
+        </form>
+        {% else %}
+        <span class="status-pill">{{ r.status }}</span>
+        {% endif %}
+      </td>
+      <td>{{ r.reply_note or "" }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="10">まだ登録がありません。</td></tr>
+    {% endfor %}
+  </table>
+</section>
+{% endblock %}

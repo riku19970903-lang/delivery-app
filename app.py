@@ -51,9 +51,11 @@ except ZoneInfoNotFoundError:
     APP_TZ = timezone(timedelta(hours=9))
 UPLOAD_DIR = BASE_DIR / "uploads" / "inspection_sheets"
 SLIP_UPLOAD_DIR = BASE_DIR / "uploads" / "inspection_slips"
+SUPPORT_UPLOAD_DIR = BASE_DIR / "uploads" / "support_requests"
 SECRET_KEY = "change-this-local-secret"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 SLIP_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+SUPPORT_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title=APP_NAME)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -69,6 +71,11 @@ SHIFT_ALLOWED_STATUSES = {"出勤", "1便", "2便", "3便", "休み"}
 SHIFT_IMPORT_HEADERS = ["日付", "名前", "出勤区分", "配達エリア", "便", "備考"]
 SHIFT_IMPORT_LIMIT = 500
 FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+PLATFORM_COMPANY_ID = 1
+COMPANY_STATUSES = ("利用中", "停止中", "お試し")
+SUPPORT_TYPES = ("不具合", "改善要望", "使い方相談")
+SUPPORT_URGENCIES = ("低", "中", "高", "緊急")
+SUPPORT_STATUSES = ("未対応", "対応中", "完了", "保留")
 FEATURE_CATALOG = [
     {"key": "basic", "label": "基本管理", "price": 3000, "note": "課金予定"},
     {"key": "members", "label": "メンバー管理", "price": 0, "note": "テスト中"},
@@ -101,6 +108,16 @@ def seed_company_features(conn, company_id: int, enabled: int = 1):
         conn.execute(
             "INSERT OR IGNORE INTO company_features(company_id, feature_key, enabled, updated_at) VALUES (?,?,?,?)",
             (company_id, feature["key"], enabled, now),
+        )
+
+
+def seed_feature_prices(conn):
+    now = datetime.now().isoformat(timespec="seconds")
+    for feature in FEATURE_CATALOG:
+        conn.execute(
+            """INSERT OR IGNORE INTO feature_prices(feature_key, label, monthly_price, note, active, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (feature["key"], feature["label"], feature["price"], feature["note"], 1, now),
         )
 
 
@@ -385,8 +402,12 @@ def company_name_for(user):
     return row_value(user, "company_name", "") or APP_NAME
 
 
+def is_platform_admin(user):
+    return row_value(user, "role") == "admin" and company_id_for(user) == PLATFORM_COMPANY_ID
+
+
 def can_manage_companies(user):
-    return row_value(user, "role") == "admin" and company_id_for(user) == 1
+    return is_platform_admin(user)
 
 
 def deleted_username_for(user_id):
@@ -430,7 +451,7 @@ def query_all(sql: str, params=()):
 
 
 def feature_price_label(feature):
-    price = int(feature.get("price") or 0)
+    price = int(row_value(feature, "monthly_price", row_value(feature, "price", 0)) or 0)
     return "基本プランに含む" if price <= 0 else f"月額{price:,}円"
 
 
@@ -449,12 +470,21 @@ def load_company_features(company_id: int):
     return enabled
 
 
+def feature_price_rows():
+    rows = query_all("SELECT * FROM feature_prices WHERE active=1 ORDER BY feature_key")
+    if not rows:
+        return [dict(feature, feature_key=feature["key"], monthly_price=feature["price"]) for feature in FEATURE_CATALOG]
+    return rows
+
+
 def company_feature_rows(company_id: int):
     enabled = load_company_features(company_id)
     rows = []
-    for feature in FEATURE_CATALOG:
+    for feature in feature_price_rows():
         item = dict(feature)
-        item["enabled"] = bool(enabled.get(feature["key"], True))
+        item["enabled"] = bool(enabled.get(item["feature_key"], True))
+        item["key"] = item["feature_key"]
+        item["price"] = item["monthly_price"]
         item["price_label"] = feature_price_label(feature)
         rows.append(item)
     return rows
@@ -467,6 +497,84 @@ def feature_enabled_for_company(company_id: int, key: str) -> bool:
 def require_feature(user, key: str):
     if not feature_enabled_for_company(company_id_for(user), key):
         raise HTTPException(status_code=403, detail="この機能は未契約です")
+
+
+def monthly_amount_for_company(company_id: int):
+    row = query_one(
+        """SELECT COALESCE(SUM(fp.monthly_price), 0) AS total
+           FROM company_features cf
+           JOIN feature_prices fp ON fp.feature_key=cf.feature_key
+           WHERE cf.company_id=? AND cf.enabled=1 AND fp.active=1""",
+        (company_id,),
+    )
+    return int(row_value(row, "total", 0) or 0)
+
+
+def pending_feature_changes(company_id: Optional[int] = None, limit: int = 100):
+    params = []
+    where = "WHERE ch.status='pending'"
+    if company_id is not None:
+        where += " AND ch.company_id=?"
+        params.append(company_id)
+    params.append(limit)
+    return query_all(
+        f"""SELECT ch.*, c.name AS company_name, fp.label AS feature_label
+            FROM company_feature_changes ch
+            JOIN companies c ON c.id=ch.company_id
+            LEFT JOIN feature_prices fp ON fp.feature_key=ch.feature_key
+            {where}
+            ORDER BY ch.effective_date, ch.created_at DESC
+            LIMIT ?""",
+        params,
+    )
+
+
+def apply_pending_feature_changes(company_id: int):
+    now = app_now().isoformat(timespec="seconds")
+    rows = query_all(
+        """SELECT * FROM company_feature_changes
+           WHERE company_id=? AND status='pending'
+           ORDER BY feature_key, created_at""",
+        (company_id,),
+    )
+    with db() as conn:
+        for row in rows:
+            conn.execute(
+                """INSERT INTO company_features(company_id, feature_key, enabled, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(company_id, feature_key) DO UPDATE SET
+                   enabled=excluded.enabled, updated_at=excluded.updated_at""",
+                (company_id, row["feature_key"], row["enabled"], now),
+            )
+            conn.execute(
+                "UPDATE company_feature_changes SET status='applied', applied_at=? WHERE id=?",
+                (now, row["id"]),
+            )
+        conn.commit()
+    return len(rows)
+
+
+def plan_label_for_company(status: str, enabled_count: int, monthly_total: int):
+    if status == "お試し":
+        return "お試し"
+    if enabled_count >= len(FEATURE_CATALOG) - 1:
+        return "フル機能"
+    if monthly_total <= 3000:
+        return "基本プラン"
+    return "標準プラン"
+
+
+def company_feature_totals():
+    rows = query_all(
+        """SELECT c.id AS company_id,
+                  COALESCE(SUM(CASE WHEN cf.enabled=1 THEN fp.monthly_price ELSE 0 END), 0) AS monthly_total,
+                  COALESCE(SUM(CASE WHEN cf.enabled=1 THEN 1 ELSE 0 END), 0) AS enabled_count
+           FROM companies c
+           LEFT JOIN company_features cf ON cf.company_id=c.id
+           LEFT JOIN feature_prices fp ON fp.feature_key=cf.feature_key AND fp.active=1
+           GROUP BY c.id"""
+    )
+    return {row["company_id"]: {"monthly_total": int(row["monthly_total"] or 0), "enabled_count": int(row["enabled_count"] or 0)} for row in rows}
 
 
 def ensure_column(conn, table: str, column: str, definition: str):
@@ -774,11 +882,52 @@ def _init_db_schema():
                 PRIMARY KEY(company_id, feature_key),
                 FOREIGN KEY(company_id) REFERENCES companies(id)
             );
+            CREATE TABLE IF NOT EXISTS feature_prices (
+                feature_key TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                monthly_price INTEGER NOT NULL DEFAULT 0,
+                note TEXT DEFAULT '',
+                active INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS company_feature_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL,
+                feature_key TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                effective_date TEXT NOT NULL,
+                requested_by INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                applied_at TEXT DEFAULT '',
+                FOREIGN KEY(company_id) REFERENCES companies(id),
+                FOREIGN KEY(requested_by) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS support_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL,
+                sender_id INTEGER NOT NULL,
+                request_type TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                body TEXT NOT NULL,
+                urgency TEXT NOT NULL DEFAULT '中',
+                image_path TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT '未対応',
+                reply_note TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(company_id) REFERENCES companies(id),
+                FOREIGN KEY(sender_id) REFERENCES users(id)
+            );
             """
         )
         ensure_column(conn, "companies", "code", "TEXT DEFAULT ''")
         ensure_column(conn, "companies", "active", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "companies", "created_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "companies", "status", "TEXT DEFAULT '利用中'")
+        ensure_column(conn, "companies", "contract_start_date", "TEXT DEFAULT ''")
+        ensure_column(conn, "companies", "next_renewal_date", "TEXT DEFAULT ''")
+        ensure_column(conn, "companies", "memo", "TEXT DEFAULT ''")
         ensure_column(conn, "users", "phone", "TEXT DEFAULT ''")
         ensure_column(conn, "users", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "users", "vehicle", "TEXT DEFAULT ''")
@@ -847,6 +996,8 @@ def _init_db_schema():
         ensure_column(conn, "vehicle_issues", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "holiday_requests", "company_id", "INTEGER NOT NULL DEFAULT 1")
         conn.execute("INSERT OR IGNORE INTO companies(id, name, created_at) VALUES (1, ?, ?)", ("SPARKLE DRIVE", datetime.now().isoformat(timespec="seconds")))
+        conn.execute("UPDATE companies SET status='利用中' WHERE COALESCE(status, '')=''")
+        seed_feature_prices(conn)
         for company in conn.execute("SELECT id FROM companies").fetchall():
             seed_company_features(conn, company["id"], 1)
         admin = conn.execute("SELECT id FROM users WHERE username = 'admin'").fetchone()
@@ -974,6 +1125,12 @@ def require_admin(user=Depends(require_user)):
     return user
 
 
+def require_platform_admin(user=Depends(require_admin)):
+    if not is_platform_admin(user):
+        raise HTTPException(status_code=403, detail="全体管理者だけが利用できます")
+    return user
+
+
 @app.get("/inspection-file", response_class=HTMLResponse)
 def inspection_file(request: Request, path: str = "", user=Depends(require_user)):
     if is_remote_image_path(path):
@@ -1003,6 +1160,7 @@ def render(request: Request, name: str, context: dict):
             "features": features,
             "feature_enabled": lambda key: is_feature_enabled(features, key),
             "can_manage_companies": can_manage_companies(user) if user else False,
+            "platform_admin": is_platform_admin(user) if user else False,
         }
     )
     return templates.TemplateResponse(name, context)
@@ -1697,6 +1855,62 @@ def logout():
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin_dashboard(request: Request, user=Depends(require_admin)):
+    if is_platform_admin(user):
+        totals = company_feature_totals()
+        companies = query_all(
+            """SELECT c.*,
+                      (SELECT username FROM users au
+                       WHERE au.company_id=c.id AND au.role='admin' AND au.active=1
+                       ORDER BY au.id LIMIT 1) AS admin_username
+               FROM companies c
+               ORDER BY c.id DESC
+               LIMIT 200"""
+        )
+        total_companies = query_one("SELECT COUNT(*) AS count FROM companies")["count"]
+        active_contracts = query_one(
+            "SELECT COUNT(*) AS count FROM companies WHERE active=1 AND COALESCE(status, '利用中')='利用中'"
+        )["count"]
+        monthly_revenue = 0
+        plan_counts = {}
+        for company in companies:
+            total = totals.get(company["id"], {"monthly_total": 0, "enabled_count": 0})
+            company_status = row_value(company, "status", "利用中") or "利用中"
+            if row_value(company, "active", 1) == 1 and company_status == "利用中":
+                monthly_revenue += total["monthly_total"]
+            plan_label = plan_label_for_company(company_status, total["enabled_count"], total["monthly_total"])
+            plan_counts[plan_label] = plan_counts.get(plan_label, 0) + 1
+        recent_companies = []
+        for company in companies[:5]:
+            item = dict(company)
+            item.update(totals.get(company["id"], {"monthly_total": 0, "enabled_count": 0}))
+            recent_companies.append(item)
+        recent_requests = attach_image_info(
+            query_all(
+                """SELECT r.*, c.name AS company_name, u.name AS sender_name
+                   FROM support_requests r
+                   JOIN companies c ON c.id=r.company_id
+                   JOIN users u ON u.id=r.sender_id
+                   ORDER BY r.created_at DESC
+                   LIMIT 10""",
+            ),
+            "image_path",
+        )
+        unresolved_count = query_one("SELECT COUNT(*) AS count FROM support_requests WHERE status='未対応'")["count"]
+        return render(
+            request,
+            "platform_admin_dashboard.html",
+            {
+                "total_companies": total_companies,
+                "active_contracts": active_contracts,
+                "monthly_revenue": monthly_revenue,
+                "unresolved_count": unresolved_count,
+                "recent_companies": recent_companies,
+                "recent_requests": recent_requests,
+                "plan_counts": [{"label": key, "count": value} for key, value in sorted(plan_counts.items())],
+                "pending_changes": pending_feature_changes(limit=20),
+            },
+        )
+
     today_s = app_today().isoformat()
     company_id = company_id_for(user)
     stats = query_one(
@@ -1727,7 +1941,7 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
     deliveries = attach_image_info(deliveries, "slip_path")
     return render(
         request,
-        "admin_dashboard.html",
+        "company_admin_dashboard.html",
         {
             "member_count": stats["member_count"],
             "log_count": stats["log_count"],
@@ -1870,6 +2084,10 @@ def admin_settings_page(
             "feature_target_company": feature_target_company,
             "feature_target_id": feature_target_id,
             "feature_rows": company_feature_rows(feature_target_id),
+            "pending_changes": pending_feature_changes(feature_target_id, limit=100),
+            "feature_prices": feature_price_rows(),
+            "company_monthly_amount": monthly_amount_for_company(feature_target_id),
+            "company_statuses": COMPANY_STATUSES,
             "message": message,
             "error": error,
         },
@@ -1932,7 +2150,10 @@ def save_company(
     code: str = Form(...),
     admin_username: str = Form(...),
     admin_password: str = Form(""),
-    active: str = Form("1"),
+    status: str = Form("利用中"),
+    contract_start_date: str = Form(""),
+    next_renewal_date: str = Form(""),
+    memo: str = Form(""),
     user=Depends(require_admin),
 ):
     if not can_manage_companies(user):
@@ -1943,7 +2164,12 @@ def save_company(
     code = code.strip()
     admin_username = admin_username.strip()
     release_purged_username(admin_username)
-    active_int = 1 if active == "1" else 0
+    if status not in COMPANY_STATUSES:
+        status = "利用中"
+    active_int = 0 if status == "停止中" else 1
+    contract_start_date = contract_start_date.strip() or app_today().isoformat()
+    next_renewal_date = next_renewal_date.strip() or (app_today() + timedelta(days=30)).isoformat()
+    memo = memo.strip()
     admin_name = f"{name} 管理者" if name else "管理者"
 
     if not name or not code or not admin_username:
@@ -1975,7 +2201,10 @@ def save_company(
 
     now = app_now().isoformat(timespec="seconds")
     if cid:
-        execute("UPDATE companies SET name=?, code=?, active=? WHERE id=?", (name, code, active_int, cid))
+        execute(
+            "UPDATE companies SET name=?, code=?, active=?, status=?, contract_start_date=?, next_renewal_date=?, memo=? WHERE id=?",
+            (name, code, active_int, status, contract_start_date, next_renewal_date, memo, cid),
+        )
         if admin:
             if admin_password:
                 execute(
@@ -1997,8 +2226,8 @@ def save_company(
         return RedirectResponse("/admin/settings?message=" + quote("会社情報を更新しました"), status_code=303)
 
     cur = execute(
-        "INSERT INTO companies(name, code, active, created_at) VALUES (?,?,?,?)",
-        (name, code, active_int, now),
+        "INSERT INTO companies(name, code, active, status, contract_start_date, next_renewal_date, memo, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        (name, code, active_int, status, contract_start_date, next_renewal_date, memo, now),
     )
     new_company_id = cur.lastrowid
     execute(
@@ -2015,13 +2244,15 @@ def save_company(
 def update_company_features(
     feature_company_id: int = Form(...),
     features: Optional[List[str]] = Form(None),
+    immediate: str = Form(""),
     user=Depends(require_admin),
 ):
     own_company_id = company_id_for(user)
-    target_company_id = feature_company_id if can_manage_companies(user) else own_company_id
-    if not can_manage_companies(user) and feature_company_id != own_company_id:
+    platform = is_platform_admin(user)
+    target_company_id = feature_company_id if platform else own_company_id
+    if not platform and feature_company_id != own_company_id:
         raise HTTPException(status_code=403, detail="他社の機能設定は変更できません")
-    company = query_one("SELECT id FROM companies WHERE id=?", (target_company_id,))
+    company = query_one("SELECT * FROM companies WHERE id=?", (target_company_id,))
     if not company:
         return RedirectResponse("/admin/settings?error=" + quote("会社が見つかりません"), status_code=303)
     selected = set(features or [])
@@ -2029,21 +2260,191 @@ def update_company_features(
     if unknown:
         return RedirectResponse("/admin/settings?error=" + quote("不明な機能が含まれています"), status_code=303)
     now = app_now().isoformat(timespec="seconds")
-    with db() as conn:
-        for feature in FEATURE_CATALOG:
-            enabled = 1 if feature["key"] in selected else 0
-            conn.execute(
-                """INSERT INTO company_features(company_id, feature_key, enabled, updated_at)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(company_id, feature_key) DO UPDATE SET
-                   enabled=excluded.enabled, updated_at=excluded.updated_at""",
-                (target_company_id, feature["key"], enabled, now),
-            )
-        conn.commit()
+    if platform and immediate != "schedule":
+        with db() as conn:
+            for feature in FEATURE_CATALOG:
+                enabled = 1 if feature["key"] in selected else 0
+                conn.execute(
+                    """INSERT INTO company_features(company_id, feature_key, enabled, updated_at)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT(company_id, feature_key) DO UPDATE SET
+                       enabled=excluded.enabled, updated_at=excluded.updated_at""",
+                    (target_company_id, feature["key"], enabled, now),
+                )
+            conn.commit()
+        message = "利用機能・プラン設定を即時更新しました"
+    else:
+        effective_date = row_value(company, "next_renewal_date", "") or (app_today() + timedelta(days=30)).isoformat()
+        with db() as conn:
+            for feature in FEATURE_CATALOG:
+                enabled = 1 if feature["key"] in selected else 0
+                existing = conn.execute(
+                    """SELECT id FROM company_feature_changes
+                       WHERE company_id=? AND feature_key=? AND status='pending'
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (target_company_id, feature["key"]),
+                ).fetchone()
+                if existing:
+                    conn.execute(
+                        """UPDATE company_feature_changes
+                           SET enabled=?, effective_date=?, requested_by=?, created_at=?, applied_at=''
+                           WHERE id=?""",
+                        (enabled, effective_date, user["id"], now, existing["id"]),
+                    )
+                else:
+                    conn.execute(
+                        """INSERT INTO company_feature_changes(company_id, feature_key, enabled, effective_date, requested_by, status, created_at)
+                           VALUES (?, ?, ?, ?, ?, 'pending', ?)""",
+                        (target_company_id, feature["key"], enabled, effective_date, user["id"], now),
+                    )
+            conn.commit()
+        message = "次回更新で反映予定の機能変更を保存しました"
     return RedirectResponse(
-        f"/admin/settings?feature_company_id={target_company_id}&message=" + quote("利用機能・プラン設定を更新しました"),
+        f"/admin/settings?feature_company_id={target_company_id}&message=" + quote(message),
         status_code=303,
     )
+
+
+@app.post("/admin/settings/features/apply-pending")
+def apply_company_feature_changes(feature_company_id: int = Form(...), user=Depends(require_platform_admin)):
+    applied = apply_pending_feature_changes(feature_company_id)
+    return RedirectResponse(
+        f"/admin/settings?feature_company_id={feature_company_id}&message=" + quote(f"{applied}件の予定変更を即時反映しました"),
+        status_code=303,
+    )
+
+
+@app.post("/admin/feature-prices")
+def update_feature_prices(
+    feature_key: List[str] = Form(...),
+    monthly_price: List[int] = Form(...),
+    note: Optional[List[str]] = Form(None),
+    user=Depends(require_platform_admin),
+):
+    now = app_now().isoformat(timespec="seconds")
+    notes = list(note or [])
+    with db() as conn:
+        for index, key in enumerate(feature_key):
+            if key not in FEATURE_KEYS:
+                continue
+            price = max(int(monthly_price[index]), 0) if index < len(monthly_price) else 0
+            item_note = notes[index] if index < len(notes) else ""
+            conn.execute(
+                "UPDATE feature_prices SET monthly_price=?, note=?, updated_at=? WHERE feature_key=?",
+                (price, item_note, now, key),
+            )
+        conn.commit()
+    return RedirectResponse("/admin/settings?message=" + quote("機能料金を更新しました"), status_code=303)
+
+
+@app.get("/support-requests", response_class=HTMLResponse)
+def support_request_page(request: Request, message: str = "", error: str = "", user=Depends(require_admin)):
+    if is_platform_admin(user):
+        return RedirectResponse("/admin/support-requests", status_code=303)
+    rows = attach_image_info(
+        query_all(
+            """SELECT r.*, c.name AS company_name, u.name AS sender_name
+               FROM support_requests r
+               JOIN companies c ON c.id=r.company_id
+               JOIN users u ON u.id=r.sender_id
+               WHERE r.company_id=?
+               ORDER BY r.created_at DESC
+               LIMIT 100""",
+            (company_id_for(user),),
+        ),
+        "image_path",
+    )
+    return render(
+        request,
+        "support_requests.html",
+        {
+            "requests": rows,
+            "support_types": SUPPORT_TYPES,
+            "support_urgencies": SUPPORT_URGENCIES,
+            "support_statuses": SUPPORT_STATUSES,
+            "platform_view": False,
+            "message": message,
+            "error": error,
+        },
+    )
+
+
+@app.post("/support-requests")
+async def create_support_request(
+    request_type: str = Form(...),
+    subject: str = Form(...),
+    body: str = Form(...),
+    urgency: str = Form("中"),
+    image: Optional[UploadFile] = File(None),
+    user=Depends(require_admin),
+):
+    if is_platform_admin(user):
+        raise HTTPException(status_code=403, detail="会社管理者として送信してください")
+    if request_type not in SUPPORT_TYPES:
+        request_type = "不具合"
+    if urgency not in SUPPORT_URGENCIES:
+        urgency = "中"
+    subject = subject.strip()
+    body = body.strip()
+    if not subject or not body:
+        return RedirectResponse("/support-requests?error=" + quote("件名と内容を入力してください"), status_code=303)
+    image_path = ""
+    if image and image.filename:
+        if not image.content_type or not image.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="添付は画像ファイルを選択してください")
+        data = await image.read()
+        if data:
+            if len(data) > 10 * 1024 * 1024:
+                raise HTTPException(status_code=400, detail="画像サイズは10MB以内にしてください")
+            suffix = safe_upload_name(image.filename)
+            filename = f"support_company{company_id_for(user)}_user{user['id']}_{app_now().strftime('%Y%m%d%H%M%S%f')}{suffix}"
+            image_path, _ = save_inspection_image(data, filename, image.content_type or "", "support_requests", SUPPORT_UPLOAD_DIR)
+    now = app_now().isoformat(timespec="seconds")
+    execute(
+        """INSERT INTO support_requests(company_id, sender_id, request_type, subject, body, urgency, image_path, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '未対応', ?, ?)""",
+        (company_id_for(user), user["id"], request_type, subject, body, urgency, image_path, now, now),
+    )
+    return RedirectResponse("/support-requests?message=" + quote("不具合・改善要望を送信しました"), status_code=303)
+
+
+@app.get("/admin/support-requests", response_class=HTMLResponse)
+def platform_support_requests(request: Request, message: str = "", error: str = "", user=Depends(require_platform_admin)):
+    rows = attach_image_info(
+        query_all(
+            """SELECT r.*, c.name AS company_name, u.name AS sender_name
+               FROM support_requests r
+               JOIN companies c ON c.id=r.company_id
+               JOIN users u ON u.id=r.sender_id
+               ORDER BY r.created_at DESC
+               LIMIT 200"""
+        ),
+        "image_path",
+    )
+    return render(
+        request,
+        "support_requests.html",
+        {
+            "requests": rows,
+            "support_types": SUPPORT_TYPES,
+            "support_urgencies": SUPPORT_URGENCIES,
+            "support_statuses": SUPPORT_STATUSES,
+            "platform_view": True,
+            "message": message,
+            "error": error,
+        },
+    )
+
+
+@app.post("/admin/support-requests/{request_id}/update")
+def update_support_request(request_id: int, status: str = Form(...), reply_note: str = Form(""), user=Depends(require_platform_admin)):
+    if status not in SUPPORT_STATUSES:
+        status = "未対応"
+    execute(
+        "UPDATE support_requests SET status=?, reply_note=?, updated_at=? WHERE id=?",
+        (status, reply_note.strip(), app_now().isoformat(timespec="seconds"), request_id),
+    )
+    return RedirectResponse("/admin/support-requests?message=" + quote("状態と返信メモを更新しました"), status_code=303)
 
 
 @app.get("/settings", response_class=HTMLResponse)

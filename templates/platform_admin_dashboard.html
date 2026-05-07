@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>SPARKLE DRIVE 全体管理</h1>
+
+<div class="grid stats">
+  <div class="tile"><span>利用会社数</span><strong>{{ total_companies }}社</strong></div>
+  <div class="tile"><span>有効契約会社数</span><strong>{{ active_contracts }}社</strong></div>
+  <div class="tile"><span>今月の想定月額売上</span><strong>{{ "{:,}".format(monthly_revenue) }}円</strong></div>
+  <div class="tile"><span>未対応の不具合・要望</span><strong>{{ unresolved_count }}件</strong></div>
+</div>
+
+<div class="grid two">
+  <section class="panel">
+    <h2>最近追加された会社</h2>
+    {% for c in recent_companies %}
+    <p class="rowline">
+      <b>{{ c.name }}</b> / {{ c.status or "利用中" }}<br>
+      <span class="hint">{{ c.code or "コード未設定" }} / 月額 {{ "{:,}".format(c.monthly_total) }}円 / 管理者 {{ c.admin_username or "未登録" }}</span>
+    </p>
+    {% else %}
+    <p class="hint">会社が未登録です。</p>
+    {% endfor %}
+  </section>
+
+  <section class="panel">
+    <h2>契約プラン別の会社数</h2>
+    {% for p in plan_counts %}
+    <p class="rowline"><b>{{ p.label }}</b> {{ p.count }}社</p>
+    {% else %}
+    <p class="hint">契約プランがありません。</p>
+    {% endfor %}
+  </section>
+</div>
+
+<section class="panel tablewrap">
+  <h2>最近届いた不具合・改善要望</h2>
+  <table>
+    <tr><th>日時</th><th>会社</th><th>種別</th><th>件名</th><th>緊急度</th><th>画像</th><th>状態・返信メモ</th></tr>
+    {% for r in recent_requests %}
+    <tr>
+      <td>{{ r.created_at }}</td><td>{{ r.company_name }}</td><td>{{ r.request_type }}</td><td>{{ r.subject }}</td><td>{{ r.urgency }}</td>
+      <td>{% if r.image_path %}<a class="button mini-button" href="{{ r.image_view_url }}">確認</a>{% else %}<span class="hint">なし</span>{% endif %}</td>
+      <td>
+        <form method="post" action="/admin/support-requests/{{ r.id }}/update" class="mini-form">
+          <select name="status">{% for s in ["未対応", "対応中", "完了", "保留"] %}<option {{ 'selected' if s == r.status else '' }}>{{ s }}</option>{% endfor %}</select>
+          <textarea name="reply_note" placeholder="返信メモ">{{ r.reply_note or '' }}</textarea>
+          <button>更新</button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">まだ届いていません。</td></tr>
+    {% endfor %}
+  </table>
+  <div class="actions"><a class="button primary" href="/admin/support-requests">不具合・要望を管理</a><a class="button" href="/admin/settings#company-management">会社・契約を管理</a></div>
+</section>
+
+<section class="panel tablewrap">
+  <h2>次回更新で反映予定の機能変更</h2>
+  <table>
+    <tr><th>反映予定日</th><th>会社</th><th>機能</th><th>変更</th><th>依頼日時</th></tr>
+    {% for ch in pending_changes %}
+    <tr><td>{{ ch.effective_date }}</td><td>{{ ch.company_name }}</td><td>{{ ch.feature_label or ch.feature_key }}</td><td>{{ "有効" if ch.enabled else "無効" }}</td><td>{{ ch.created_at }}</td></tr>
+    {% else %}
+    <tr><td colspan="5">反映予定の変更はありません。</td></tr>
+    {% endfor %}
+  </table>
+</section>
+{% endblock %}
