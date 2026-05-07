@@ -2358,6 +2358,8 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
         )
 
     today_s = app_today().isoformat()
+    tomorrow_s = (app_today() + timedelta(days=1)).isoformat()
+    day_after_s = (app_today() + timedelta(days=2)).isoformat()
     company_id = company_id_for(user)
     stats = query_one(
         """SELECT
@@ -2385,6 +2387,33 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
         (today_s, company_id),
     )
     deliveries = attach_image_info(deliveries, "slip_path")
+    mobile_delivery_status = query_all(
+        """SELECT u.id, u.name, d.id AS delivery_id,
+                  COALESCE(d.completed, 0) AS completed,
+                  COALESCE(d.night, 0) AS night,
+                  COALESCE(d.pickup, 0) AS pickup,
+                  COALESCE(d.large, 0) AS large
+           FROM users u
+           LEFT JOIN deliveries d ON d.user_id=u.id AND d.company_id=? AND d.work_date=?
+           WHERE u.company_id=? AND u.role='member' AND u.active=1 AND COALESCE(u.purged,0)=0
+           ORDER BY u.name LIMIT 200""",
+        (company_id, today_s, company_id),
+    )
+    upcoming_shifts = attach_shift_areas(
+        query_all(
+            """SELECT s.*, u.name, d.name AS district_name, t.name AS town_name
+               FROM shifts s
+               JOIN users u ON u.id=s.user_id
+               LEFT JOIN districts d ON d.id=s.district_id
+               LEFT JOIN towns t ON t.id=s.town_id
+               WHERE s.company_id=? AND s.shift_date BETWEEN ? AND ? AND s.decided=1
+               ORDER BY s.shift_date, u.name LIMIT 120""",
+            (company_id, tomorrow_s, day_after_s),
+        )
+    )
+    shifts_by_mobile_day = []
+    for day_s in (tomorrow_s, day_after_s):
+        shifts_by_mobile_day.append({"date": day_s, "items": [shift for shift in upcoming_shifts if shift["shift_date"] == day_s]})
     vehicle_alerts = []
     for vehicle in vehicle_rows_for_company(company_id):
         info = vehicle_alert(vehicle)
@@ -2392,7 +2421,47 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
             item = dict(vehicle)
             item["alert"] = info
             vehicle_alerts.append(item)
+    open_vehicle_issues = query_all(
+        """SELECT v.*, u.name FROM vehicle_issues v
+           JOIN users u ON u.id=v.user_id
+           WHERE v.company_id=? AND v.status IN ('未対応','確認中','修理依頼中')
+           ORDER BY CASE v.severity WHEN '高' THEN 1 WHEN '中' THEN 2 ELSE 3 END, v.created_at DESC LIMIT 10""",
+        (company_id,),
+    )
     holiday_status = holiday_submission_status(company_id)
+    notifications = []
+    health_logs = query_all(
+        """SELECT w.*, u.name FROM work_logs w
+           JOIN users u ON u.id=w.user_id
+           WHERE w.company_id=? AND w.work_date=? AND w.health_status IN ('注意','不調')
+           ORDER BY w.logged_at DESC LIMIT 10""",
+        (company_id, today_s),
+    )
+    for log in health_logs:
+        notifications.append({"level": "red" if log["health_status"] == "不調" else "yellow", "title": "体調不良報告", "body": f"{log['name']} / {log['health_status']}", "time": log["logged_at"]})
+    for issue in open_vehicle_issues:
+        notifications.append({"level": "red" if issue["severity"] == "高" else "yellow", "title": "不具合報告", "body": f"{issue['vehicle_name']} / {issue['detail']}", "time": issue["created_at"]})
+    holiday_notice_rows = query_all(
+        """SELECT h.*, u.name FROM holiday_requests h
+           JOIN users u ON u.id=h.user_id
+           WHERE h.company_id=? AND h.request_date>=?
+           ORDER BY h.created_at DESC LIMIT 10""",
+        (company_id, today_s),
+    )
+    for holiday in holiday_notice_rows:
+        notifications.append({"level": "yellow", "title": "休み希望", "body": f"{holiday['name']} / {holiday['request_date']}", "time": holiday["created_at"]})
+    support_rows = query_all(
+        """SELECT r.*, u.name AS sender_name FROM support_requests r
+           JOIN users u ON u.id=r.sender_id
+           WHERE r.company_id=? AND r.status IN ('未対応','対応中')
+           ORDER BY CASE r.urgency WHEN '緊急' THEN 1 WHEN '高' THEN 2 WHEN '中' THEN 3 ELSE 4 END, r.created_at DESC LIMIT 10""",
+        (company_id,),
+    )
+    for req in support_rows:
+        notifications.append({"level": "red" if req["urgency"] in {"緊急", "高"} else "yellow", "title": req["request_type"], "body": f"{req['subject']} / {req['sender_name']}", "time": req["created_at"]})
+    rank = {"red": 0, "orange": 1, "yellow": 2}
+    notifications = sorted(notifications, key=lambda item: item.get("time", ""), reverse=True)
+    notifications = sorted(notifications, key=lambda item: rank.get(item["level"], 9))[:12]
     return render(
         request,
         "company_admin_dashboard.html",
@@ -2405,6 +2474,10 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
             "deliveries": deliveries,
             "vehicle_alerts": vehicle_alerts[:5],
             "holiday_status": holiday_status,
+            "mobile_delivery_status": mobile_delivery_status,
+            "mobile_shift_days": shifts_by_mobile_day,
+            "open_vehicle_issues": open_vehicle_issues,
+            "priority_notifications": notifications,
         },
     )
 
@@ -3300,7 +3373,15 @@ def mobile_work_start(
             conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=?", (vehicle["id"], vehicle["name"], user["id"]))
         update_vehicle_odometer(conn, company_id, vehicle["id"] if vehicle else None, vehicle_name, odometer, now)
         conn.commit()
-    return RedirectResponse("/member?message=start", status_code=303)
+    return RedirectResponse("/mobile/work/start/complete", status_code=303)
+
+
+@app.get("/mobile/work/start/complete", response_class=HTMLResponse)
+def mobile_work_start_complete(request: Request, user=Depends(require_user)):
+    require_feature(user, "safety")
+    if user["role"] == "admin":
+        return RedirectResponse("/admin", status_code=303)
+    return render(request, "mobile_work_start_complete.html", {})
 
 
 @app.get("/mobile/work/end", response_class=HTMLResponse)

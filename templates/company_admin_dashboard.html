@@ -1,49 +1,153 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>{{ company_name or "SPARKLE DRIVE" }} 管理</h1>
-<section class="mobile-menu-panel">
-  <div class="mobile-menu-grid">
-    {% if feature_enabled('members') %}<a class="mobile-menu-item" href="/admin/members"><span>メ</span><b>メンバー</b></a>{% endif %}
-    {% if feature_enabled('shifts') %}<a class="mobile-menu-item" href="/admin/shifts"><span>シ</span><b>シフト</b></a>{% endif %}
-    {% if feature_enabled('inspection') %}<a class="mobile-menu-item" href="/inspection-sheets"><span>点</span><b>点検表</b></a>{% endif %}
-    {% if feature_enabled('deliveries') %}<a class="mobile-menu-item" href="/deliveries"><span>配</span><b>配達一覧</b></a>{% endif %}
-    {% if feature_enabled('rewards') %}<a class="mobile-menu-item" href="/rewards"><span>売</span><b>売上・報酬</b></a>{% endif %}
-    {% if feature_enabled('safety') %}<a class="mobile-menu-item" href="/admin/safety"><span>安</span><b>安全記録</b></a>{% endif %}
-  {% if feature_enabled('issues') %}<a class="mobile-menu-item" href="/vehicle-issues"><span>不</span><b>不具合</b></a>{% endif %}
-    {% if feature_enabled('vehicle') %}<a class="mobile-menu-item" href="/admin/vehicles"><span>車</span><b>車両管理</b></a>{% endif %}
-    <a class="mobile-menu-item" href="/support-requests"><span>要</span><b>要望送信</b></a>
-    <a class="mobile-menu-item" href="/admin/settings"><span>設</span><b>設定</b></a>
+<section class="admin-mobile-home">
+  <div class="admin-mobile-hero">
+    <p class="flow-eyebrow">SPARKLE DRIVE</p>
+    <h1>{{ company_name or "SPARKLE DRIVE" }} 管理</h1>
+    <p>今日見るべきことだけをまとめています。</p>
   </div>
-</section>
-<div class="grid stats">
-  {% if feature_enabled('members') %}<div class="tile"><span>登録メンバー</span><strong>{{ member_count }}名</strong></div>{% endif %}
-  {% if feature_enabled('safety') %}<div class="tile"><span>本日の点呼記録</span><strong>{{ log_count }}件</strong></div>{% endif %}
-  {% if feature_enabled('deliveries') %}<div class="tile"><span>本日の配達入力</span><strong>{{ delivery_count }}件</strong></div>{% endif %}
-</div>
-<div class="grid two">
+
+  <div class="admin-mobile-menu">
+    {% if feature_enabled('members') %}<a href="/admin/members"><span>メ</span><b>メンバー</b></a>{% endif %}
+    {% if feature_enabled('deliveries') %}<a href="/deliveries"><span>配</span><b>配達</b></a>{% endif %}
+    {% if feature_enabled('shifts') %}<a href="/admin/shifts"><span>シ</span><b>シフト</b></a>{% endif %}
+    {% if feature_enabled('vehicle') %}<a href="/admin/vehicles"><span>車</span><b>車両</b></a>{% endif %}
+    {% if feature_enabled('safety') %}<a href="/admin/safety"><span>安</span><b>安全</b></a>{% endif %}
+    {% if feature_enabled('issues') %}<a href="/vehicle-issues"><span>不</span><b>不具合</b></a>{% endif %}
+    {% if feature_enabled('holidays') %}<a href="/holidays"><span>休</span><b>休み希望</b></a>{% endif %}
+    <a href="/support-requests"><span>要</span><b>要望</b></a>
+    <a href="/admin/settings"><span>設</span><b>設定</b></a>
+  </div>
+
+  {% if feature_enabled('deliveries') %}
+  <section class="admin-mobile-section">
+    <h2>本日のみんなの配達状況</h2>
+    <div class="admin-delivery-cards">
+      {% for d in mobile_delivery_status %}
+      <div class="admin-delivery-card {{ 'done' if d.delivery_id else 'missing' }}">
+        <div>
+          <b>{{ d.name }}</b>
+          <span>{{ "入力済み" if d.delivery_id else "未入力" }}</span>
+        </div>
+        <dl>
+          <div><dt>完了</dt><dd>{{ d.completed }}</dd></div>
+          <div><dt>夜間</dt><dd>{{ d.night }}</dd></div>
+          <div><dt>集荷</dt><dd>{{ d.pickup }}</dd></div>
+          <div><dt>大型</dt><dd>{{ d.large }}</dd></div>
+        </dl>
+      </div>
+      {% else %}
+      <p class="hint">登録メンバーがいません。</p>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
   {% if feature_enabled('vehicle') %}
-  <section class="panel">
+  <section class="admin-mobile-section">
     <h2>車両アラート</h2>
-    {% for v in vehicle_alerts %}
-    <p class="rowline"><b>{{ v.name }}</b><br><span class="vehicle-alert {{ v.alert.inspection_level }}">{{ v.alert.inspection_message }}</span><br><span class="vehicle-alert {{ v.alert.oil_level }}">{{ v.alert.oil_message }}</span></p>
-    {% else %}
-    <p>車両アラートはありません。</p>
+    <div class="admin-alert-list">
+      {% for v in vehicle_alerts %}
+      <div class="admin-alert-card {{ v.alert.level }}">
+        <b>{{ v.name }}</b>
+        <span>{{ v.alert.inspection_message }}</span>
+        <span>{{ v.alert.oil_message }}</span>
+      </div>
+      {% endfor %}
+      {% for issue in open_vehicle_issues %}
+      <div class="admin-alert-card {{ 'red' if issue.severity == '高' else 'yellow' }}">
+        <b>{{ issue.vehicle_name }}</b>
+        <span>不具合報告中: {{ issue.detail }}</span>
+        <small>{{ issue.name }} / {{ issue.status }}</small>
+      </div>
+      {% endfor %}
+      {% if not vehicle_alerts and not open_vehicle_issues %}
+      <p class="hint">重要な車両アラートはありません。</p>
+      {% endif %}
+    </div>
+  </section>
+  {% endif %}
+
+  {% if feature_enabled('shifts') %}
+  <section class="admin-mobile-section">
+    <h2>明日・明後日のシフト</h2>
+    {% for group in mobile_shift_days %}
+    <div class="admin-shift-day-card">
+      <h3>{{ group.date }}</h3>
+      {% for s in group.items %}
+      <div class="admin-shift-row">
+        <b>{{ s.name }}</b>
+        <span>{{ s.status }}{% if s.status != "休み" and s.area_short_text %} / {{ s.area_short_text }}{% endif %}</span>
+      </div>
+      {% else %}
+      <p class="hint">シフト未登録です。</p>
+      {% endfor %}
+    </div>
     {% endfor %}
-    <a class="button" href="/admin/vehicles">車両管理へ</a>
   </section>
   {% endif %}
-  {% if feature_enabled('holidays') %}
-  <section class="panel">
-    <h2>休み希望提出状況</h2>
-    <p><b>{{ holiday_status.ym }}</b> 対象</p>
-    <p>提出 {{ holiday_status.submitted_count }}名 / 未提出 {{ holiday_status.missing_count }}名 / 登録メンバー {{ holiday_status.member_count }}名</p>
-    {% if holiday_status.deadline_alert.message %}<p class="alert">{{ holiday_status.deadline_alert.message }}</p>{% endif %}
-    <a class="button" href="/holidays">休み希望一覧へ</a>
+
+  <section class="admin-mobile-section">
+    <h2>優先通知</h2>
+    <div class="admin-alert-list">
+      {% for notice in priority_notifications %}
+      <div class="admin-alert-card {{ notice.level }}">
+        <b>{{ notice.title }}</b>
+        <span>{{ notice.body }}</span>
+      </div>
+      {% else %}
+      <p class="hint">優先通知はありません。</p>
+      {% endfor %}
+    </div>
   </section>
-  {% endif %}
-</div>
-<div class="grid two">
-  {% if feature_enabled('deliveries') %}<section class="panel"><h2>本日の配達個数</h2>{% include "parts_delivery_table.html" %}</section>{% endif %}
-  {% if feature_enabled('issues') %}<section class="panel"><h2>車両不具合 最新</h2>{% for i in issues %}<p class="rowline"><b>{{ i.name }}</b> {{ i.issue_date }} {{ i.severity }}<br>{{ i.detail }}</p>{% else %}<p>未登録です。</p>{% endfor %}</section>{% endif %}
+</section>
+
+<div class="admin-desktop-home">
+  <h1>{{ company_name or "SPARKLE DRIVE" }} 管理</h1>
+  <section class="mobile-menu-panel">
+    <div class="mobile-menu-grid">
+      {% if feature_enabled('members') %}<a class="mobile-menu-item" href="/admin/members"><span>メ</span><b>メンバー</b></a>{% endif %}
+      {% if feature_enabled('shifts') %}<a class="mobile-menu-item" href="/admin/shifts"><span>シ</span><b>シフト</b></a>{% endif %}
+      {% if feature_enabled('inspection') %}<a class="mobile-menu-item" href="/inspection-sheets"><span>点</span><b>点検表</b></a>{% endif %}
+      {% if feature_enabled('deliveries') %}<a class="mobile-menu-item" href="/deliveries"><span>配</span><b>配達一覧</b></a>{% endif %}
+      {% if feature_enabled('rewards') %}<a class="mobile-menu-item" href="/rewards"><span>売</span><b>売上・報酬</b></a>{% endif %}
+      {% if feature_enabled('safety') %}<a class="mobile-menu-item" href="/admin/safety"><span>安</span><b>安全記録</b></a>{% endif %}
+      {% if feature_enabled('issues') %}<a class="mobile-menu-item" href="/vehicle-issues"><span>不</span><b>不具合</b></a>{% endif %}
+      {% if feature_enabled('vehicle') %}<a class="mobile-menu-item" href="/admin/vehicles"><span>車</span><b>車両管理</b></a>{% endif %}
+      <a class="mobile-menu-item" href="/support-requests"><span>要</span><b>要望送信</b></a>
+      <a class="mobile-menu-item" href="/admin/settings"><span>設</span><b>設定</b></a>
+    </div>
+  </section>
+  <div class="grid stats">
+    {% if feature_enabled('members') %}<div class="tile"><span>登録メンバー</span><strong>{{ member_count }}名</strong></div>{% endif %}
+    {% if feature_enabled('safety') %}<div class="tile"><span>本日の点呼記録</span><strong>{{ log_count }}件</strong></div>{% endif %}
+    {% if feature_enabled('deliveries') %}<div class="tile"><span>本日の配達入力</span><strong>{{ delivery_count }}件</strong></div>{% endif %}
+  </div>
+  <div class="grid two">
+    {% if feature_enabled('vehicle') %}
+    <section class="panel">
+      <h2>車両アラート</h2>
+      {% for v in vehicle_alerts %}
+      <p class="rowline"><b>{{ v.name }}</b><br><span class="vehicle-alert {{ v.alert.inspection_level }}">{{ v.alert.inspection_message }}</span><br><span class="vehicle-alert {{ v.alert.oil_level }}">{{ v.alert.oil_message }}</span></p>
+      {% else %}
+      <p>車両アラートはありません。</p>
+      {% endfor %}
+      <a class="button" href="/admin/vehicles">車両管理へ</a>
+    </section>
+    {% endif %}
+    {% if feature_enabled('holidays') %}
+    <section class="panel">
+      <h2>休み希望提出状況</h2>
+      <p><b>{{ holiday_status.ym }}</b> 対象</p>
+      <p>提出 {{ holiday_status.submitted_count }}名 / 未提出 {{ holiday_status.missing_count }}名 / 登録メンバー {{ holiday_status.member_count }}名</p>
+      {% if holiday_status.deadline_alert.message %}<p class="alert">{{ holiday_status.deadline_alert.message }}</p>{% endif %}
+      <a class="button" href="/holidays">休み希望一覧へ</a>
+    </section>
+    {% endif %}
+  </div>
+  <div class="grid two">
+    {% if feature_enabled('deliveries') %}<section class="panel"><h2>本日の配達個数</h2>{% include "parts_delivery_table.html" %}</section>{% endif %}
+    {% if feature_enabled('issues') %}<section class="panel"><h2>車両不具合 最新</h2>{% for i in issues %}<p class="rowline"><b>{{ i.name }}</b> {{ i.issue_date }} {{ i.severity }}<br>{{ i.detail }}</p>{% else %}<p>未登録です。</p>{% endfor %}</section>{% endif %}
+  </div>
 </div>
 {% endblock %}

@@ -114,6 +114,14 @@
       show();
       window.scrollTo({top: 0, behavior: "smooth"});
     }));
+    form.addEventListener("submit", () => {
+      if (form.dataset.saving === "1") return;
+      form.dataset.saving = "1";
+      form.querySelectorAll("button").forEach((button) => {
+        button.disabled = true;
+        if (button.type !== "button") button.textContent = "保存中...";
+      });
+    });
   });
 
   const imageInput = document.getElementById("mobile-inspection-image");

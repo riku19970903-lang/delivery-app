@@ -57,4 +57,16 @@
     </div>
   </form>
 </section>
+<script>
+  document.querySelectorAll(".confirm-card").forEach((form) => {
+    form.addEventListener("submit", () => {
+      if (form.dataset.saving === "1") return;
+      form.dataset.saving = "1";
+      form.querySelectorAll("button").forEach((button) => {
+        button.disabled = true;
+        button.textContent = "保存中...";
+      });
+    });
+  });
+</script>
 {% endblock %}
