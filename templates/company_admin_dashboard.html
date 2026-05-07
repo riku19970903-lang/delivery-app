@@ -74,7 +74,7 @@
     {% for group in mobile_shift_days %}
     <div class="admin-shift-day-card">
       <h3>{{ group.date }}</h3>
-      {% for s in group.items %}
+      {% for s in group["items"] %}
       <div class="admin-shift-row">
         <b>{{ s.name }}</b>
         <span>{{ s.status }}{% if s.status != "休み" and s.area_short_text %} / {{ s.area_short_text }}{% endif %}</span>
