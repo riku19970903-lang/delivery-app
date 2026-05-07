@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="flow-shell">
+  <div class="flow-page-head complete">
+    <p class="flow-eyebrow">本日のまとめ</p>
+    <h1>お疲れ様でした！</h1>
+    <p>{{ target }} の売上と配達数です。</p>
+  </div>
+
+  <div class="flow-summary-grid complete-grid">
+    <div class="flow-summary-card emphasis">
+      <span>今日の売上見込み</span>
+      <b>{{ "{:,}".format(reward) }}円</b>
+    </div>
+    <div class="flow-summary-card">
+      <span>配達完了</span>
+      <b>{{ delivery.completed if delivery else 0 }}個</b>
+    </div>
+    <div class="flow-summary-card">
+      <span>集荷</span>
+      <b>{{ delivery.pickup if delivery else 0 }}個</b>
+    </div>
+  </div>
+
+  {% if delivery %}
+  <section class="flow-mini-panel">
+    <h2>内訳</h2>
+    <div class="flow-count-readonly">
+      <span>転送 {{ delivery.transfer }}個</span>
+      <span>夜間 {{ delivery.night }}個</span>
+      <span>大型 {{ delivery.large }}個</span>
+    </div>
+  </section>
+  {% endif %}
+
+  <div class="flow-actions">
+    <a class="button primary" href="/member">ホームへ戻る</a>
+    <a class="button" href="/rewards">今月の売上を見る</a>
+  </div>
+</section>
+{% endblock %}

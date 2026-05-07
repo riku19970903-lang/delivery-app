@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="flow-shell">
+  <div class="flow-page-head">
+    <p class="flow-eyebrow">出勤フロー</p>
+    <h1>出勤する</h1>
+    <p>本日の車両: <b>{{ vehicle_name }}</b></p>
+  </div>
+
+  <form method="post" class="flow-card flow-step-form">
+    <input type="hidden" name="work_date" value="{{ work_date }}">
+
+    <div class="flow-step active" data-step="1">
+      <span class="step-count">STEP 1 / 2</span>
+      <h2>現在の走行距離</h2>
+      <label>走行距離
+        <input type="number" name="odometer" value="{{ last_odometer if last_odometer else '' }}" min="0" inputmode="numeric" placeholder="例: 12345" required>
+      </label>
+      {% if last_odometer %}
+      <p class="hint">前回の走行距離を候補として入れています。</p>
+      {% endif %}
+      <button type="button" class="flow-next">次へ</button>
+    </div>
+
+    <div class="flow-step" data-step="2">
+      <span class="step-count">STEP 2 / 2</span>
+      <h2>アルコールチェック</h2>
+      <label>日時
+        <input type="datetime-local" name="logged_at" value="{{ logged_at }}" required>
+      </label>
+      <label>アルコール数値または結果
+        <input name="alcohol_result" value="0.00" placeholder="例: 0.00 / OK" required>
+      </label>
+      <label>検知器使用
+        <select name="detector_used">
+          <option>有</option>
+          <option>無</option>
+        </select>
+      </label>
+      <label>体調
+        <select name="health_status">
+          <option>良好</option>
+          <option>注意</option>
+          <option>不調</option>
+        </select>
+      </label>
+      <label>メモ
+        <textarea name="notes" placeholder="必要な時だけ入力"></textarea>
+      </label>
+      <div class="flow-actions">
+        <button type="button" class="flow-back">戻る</button>
+        <button class="flow-submit start">出勤登録</button>
+      </div>
+    </div>
+  </form>
+</section>
+
+<script>
+  document.querySelectorAll(".flow-step-form").forEach((form) => {
+    const steps = [...form.querySelectorAll(".flow-step")];
+    let index = 0;
+    const show = () => steps.forEach((step, i) => step.classList.toggle("active", i === index));
+    form.querySelectorAll(".flow-next").forEach((button) => button.addEventListener("click", () => {
+      const currentInputs = [...steps[index].querySelectorAll("input, select, textarea")];
+      if (currentInputs.some((input) => !input.reportValidity())) return;
+      index = Math.min(index + 1, steps.length - 1);
+      show();
+      window.scrollTo({top: 0, behavior: "smooth"});
+    }));
+    form.querySelectorAll(".flow-back").forEach((button) => button.addEventListener("click", () => {
+      index = Math.max(index - 1, 0);
+      show();
+      window.scrollTo({top: 0, behavior: "smooth"});
+    }));
+  });
+</script>
+{% endblock %}

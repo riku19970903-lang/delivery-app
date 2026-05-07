@@ -383,6 +383,15 @@ def attach_image_info(rows, path_field="file_path"):
     return [with_image_info(row, path_field) for row in rows]
 
 
+def save_image_data_for_ocr(data: bytes, filename: str, content_type: str, folder: str, local_dir: Path):
+    local_dir.mkdir(parents=True, exist_ok=True)
+    disk_path = local_dir / filename
+    disk_path.write_bytes(data)
+    remote_url = upload_to_supabase_storage(folder, filename, data, content_type)
+    public_path = remote_url or f"/uploads/{folder}/{filename}"
+    return public_path, disk_path
+
+
 def row_value(row, key, default=None):
     if not row:
         return default
@@ -731,6 +740,7 @@ def _init_db_schema():
                 work_date TEXT NOT NULL,
                 log_type TEXT NOT NULL CHECK(log_type IN ('start','end')),
                 logged_at TEXT NOT NULL,
+                odometer INTEGER NOT NULL DEFAULT 0,
                 alcohol_result TEXT NOT NULL,
                 detector_used TEXT NOT NULL,
                 intoxicated TEXT NOT NULL,
@@ -931,6 +941,8 @@ def _init_db_schema():
         ensure_column(conn, "users", "phone", "TEXT DEFAULT ''")
         ensure_column(conn, "users", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "users", "vehicle", "TEXT DEFAULT ''")
+        ensure_column(conn, "users", "oil_change_date", "TEXT DEFAULT ''")
+        ensure_column(conn, "users", "vehicle_inspection_due", "TEXT DEFAULT ''")
         ensure_column(conn, "users", "active", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "users", "purged", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "users", "deleted_at", "TEXT DEFAULT ''")
@@ -946,6 +958,7 @@ def _init_db_schema():
         ensure_column(conn, "rates", "vehicle_monthly_fee", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "work_logs", "alcohol_result", "TEXT DEFAULT ''")
         ensure_column(conn, "work_logs", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "work_logs", "odometer", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "work_logs", "detector_used", "TEXT DEFAULT ''")
         ensure_column(conn, "work_logs", "intoxicated", "TEXT DEFAULT ''")
         ensure_column(conn, "work_logs", "health_status", "TEXT DEFAULT ''")
@@ -1691,6 +1704,84 @@ def upcoming_member_shifts(user_id: int, today_s: str, company_id: Optional[int]
         params,
     )
     return attach_shift_areas(rows)
+
+
+def today_work_state(user_id: int, company_id: int, today_s: str):
+    start_log = query_one(
+        """SELECT * FROM work_logs
+           WHERE user_id=? AND company_id=? AND work_date=? AND log_type='start'
+           ORDER BY logged_at DESC LIMIT 1""",
+        (user_id, company_id, today_s),
+    )
+    end_log = query_one(
+        """SELECT * FROM work_logs
+           WHERE user_id=? AND company_id=? AND work_date=? AND log_type='end'
+           ORDER BY logged_at DESC LIMIT 1""",
+        (user_id, company_id, today_s),
+    )
+    if end_log and (not start_log or str(end_log["logged_at"]) >= str(start_log["logged_at"])):
+        return {"status": "finished", "label": "退勤済", "start_log": start_log, "end_log": end_log}
+    if start_log:
+        return {"status": "working", "label": "出勤中", "start_log": start_log, "end_log": end_log}
+    return {"status": "not_started", "label": "未出勤", "start_log": start_log, "end_log": end_log}
+
+
+def latest_odometer_for_user(user_id: int, company_id: int):
+    row = query_one(
+        """SELECT odometer FROM work_logs
+           WHERE user_id=? AND company_id=? AND COALESCE(odometer, 0)>0
+           ORDER BY work_date DESC, logged_at DESC LIMIT 1""",
+        (user_id, company_id),
+    )
+    return row["odometer"] if row else 0
+
+
+def upsert_delivery_counts(company_id: int, user_id: int, work_date: str, completed: int, transfer: int, night: int, pickup: int, large: int, vehicle_rental: str = "none", memo: str = "", inspection_sheet_path: str = ""):
+    now = app_now().isoformat(timespec="seconds")
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO deliveries(company_id, user_id, work_date, completed, transfer, night, pickup, large, vehicle_rental, memo, inspection_sheet_path, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(user_id, work_date) DO UPDATE SET completed=excluded.completed, transfer=excluded.transfer,
+               night=excluded.night, pickup=excluded.pickup, large=excluded.large, vehicle_rental=excluded.vehicle_rental,
+               memo=excluded.memo, inspection_sheet_path=COALESCE(NULLIF(excluded.inspection_sheet_path, ''), deliveries.inspection_sheet_path),
+               updated_at=excluded.updated_at, company_id=excluded.company_id""",
+            (
+                company_id,
+                user_id,
+                work_date,
+                max(completed, 0),
+                max(transfer, 0),
+                max(night, 0),
+                max(pickup, 0),
+                max(large, 0),
+                vehicle_rental,
+                memo,
+                inspection_sheet_path or "",
+                now,
+                now,
+            ),
+        )
+        delivery = conn.execute("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user_id, company_id, work_date)).fetchone()
+        conn.commit()
+        return delivery
+
+
+def save_inspection_slip_record(company_id: int, user_id: int, delivery_id: int, work_date: str, image_path: str, original_filename: str = "", content_type: str = ""):
+    if not image_path:
+        return
+    now = app_now().isoformat(timespec="seconds")
+    with db() as conn:
+        conn.execute(
+            """INSERT INTO inspection_slips(company_id, user_id, delivery_id, slip_date, file_path, original_filename, content_type, uploaded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, slip_date) DO UPDATE SET delivery_id=excluded.delivery_id,
+               company_id=excluded.company_id, file_path=excluded.file_path, original_filename=excluded.original_filename,
+               content_type=excluded.content_type, uploaded_at=excluded.uploaded_at""",
+            (company_id, user_id, delivery_id, work_date, image_path, original_filename, content_type, now),
+        )
+        conn.execute("UPDATE deliveries SET inspection_sheet_path=?, updated_at=? WHERE id=? AND company_id=?", (image_path, now, delivery_id, company_id))
+        conn.commit()
 
 
 def extract_delivery_counts(ocr_text: str = ""):
@@ -2533,7 +2624,8 @@ def save_vehicle_rates(daily_fee: int = Form(...), monthly_fee: int = Form(...),
 def member_home(request: Request, user=Depends(require_user)):
     if user["role"] == "admin":
         return RedirectResponse("/admin", status_code=303)
-    today_s = app_today().isoformat()
+    now_dt = app_now()
+    today_s = now_dt.date().isoformat()
     company_id = company_id_for(user)
     delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user["id"], company_id, today_s))
     rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (user["id"], company_id))
@@ -2544,6 +2636,8 @@ def member_home(request: Request, user=Depends(require_user)):
     today_shift = shifts[0] if shifts and shifts[0]["shift_date"] == today_s else None
     next_shifts = [item for item in shifts if item["shift_date"] != today_s][:2]
     comment = auto_comment(delivery, reward, bool(today_shift))
+    work_state = today_work_state(user["id"], company_id, today_s)
+    last_odometer = latest_odometer_for_user(user["id"], company_id)
     return render(
         request,
         "member_home.html",
@@ -2555,6 +2649,13 @@ def member_home(request: Request, user=Depends(require_user)):
             "month_summary": month_summary,
             "today_shift": today_shift,
             "next_shifts": next_shifts,
+            "work_state": work_state,
+            "last_odometer": last_odometer,
+            "today_label": f"{now_dt.year}年 {now_dt.month}月{now_dt.day}日",
+            "current_time": now_dt.strftime("%H:%M"),
+            "vehicle_name": row_value(user, "vehicle", "") or "車両未登録",
+            "oil_change_date": row_value(user, "oil_change_date", "") or "未設定",
+            "vehicle_inspection_due": row_value(user, "vehicle_inspection_due", "") or "未設定",
         },
     )
 
@@ -2585,6 +2686,7 @@ def save_work_log(
     work_date: str = Form(...),
     log_type: str = Form(...),
     logged_at: str = Form(...),
+    odometer: int = Form(0),
     alcohol_result: str = Form(...),
     detector_used: str = Form(...),
     intoxicated: str = Form(...),
@@ -2599,11 +2701,300 @@ def save_work_log(
     require_feature(user, "safety")
     execute(
         """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, alcohol_result, detector_used,
-           intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (company_id_for(user), user["id"], work_date, log_type, logged_at, alcohol_result, detector_used, intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, app_now().isoformat(timespec="seconds")),
+           intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at, odometer)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (company_id_for(user), user["id"], work_date, log_type, logged_at, alcohol_result, detector_used, intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, app_now().isoformat(timespec="seconds"), max(odometer, 0)),
     )
     return RedirectResponse("/work-log", status_code=303)
+
+
+@app.get("/mobile/work/start", response_class=HTMLResponse)
+def mobile_work_start_page(request: Request, user=Depends(require_user)):
+    require_feature(user, "safety")
+    if user["role"] == "admin":
+        return RedirectResponse("/admin", status_code=303)
+    company_id = company_id_for(user)
+    today_s = app_today().isoformat()
+    state = today_work_state(user["id"], company_id, today_s)
+    if state["status"] != "not_started":
+        return RedirectResponse("/member", status_code=303)
+    now_dt = app_now()
+    return render(
+        request,
+        "mobile_work_start.html",
+        {
+            "work_date": today_s,
+            "logged_at": now_dt.strftime("%Y-%m-%dT%H:%M"),
+            "last_odometer": latest_odometer_for_user(user["id"], company_id),
+            "vehicle_name": row_value(user, "vehicle", "") or "車両未登録",
+        },
+    )
+
+
+@app.post("/mobile/work/start")
+def mobile_work_start(
+    work_date: str = Form(...),
+    logged_at: str = Form(""),
+    odometer: int = Form(0),
+    alcohol_result: str = Form("0.00"),
+    detector_used: str = Form("有"),
+    health_status: str = Form("良好"),
+    notes: str = Form(""),
+    user=Depends(require_user),
+):
+    require_feature(user, "safety")
+    if user["role"] == "admin":
+        raise HTTPException(status_code=403, detail="メンバーとしてログインしてください")
+    company_id = company_id_for(user)
+    state = today_work_state(user["id"], company_id, work_date)
+    if state["status"] != "not_started":
+        return RedirectResponse("/member", status_code=303)
+    logged_at = logged_at or app_now().strftime("%Y-%m-%dT%H:%M")
+    vehicle_note = f"車両: {row_value(user, 'vehicle', '') or '未登録'}"
+    notes = " / ".join(part for part in [vehicle_note, notes.strip()] if part)
+    execute(
+        """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, odometer, alcohol_result, detector_used,
+           intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            company_id,
+            user["id"],
+            work_date,
+            "start",
+            logged_at,
+            max(odometer, 0),
+            alcohol_result or "OK",
+            detector_used,
+            "無",
+            health_status or "良好",
+            "問題なし",
+            "問題なし",
+            "問題なし",
+            "",
+            notes,
+            app_now().isoformat(timespec="seconds"),
+        ),
+    )
+    return RedirectResponse("/member?message=start", status_code=303)
+
+
+@app.get("/mobile/work/end", response_class=HTMLResponse)
+def mobile_work_end_page(request: Request, user=Depends(require_user)):
+    require_feature(user, "safety")
+    require_feature(user, "deliveries")
+    if user["role"] == "admin":
+        return RedirectResponse("/admin", status_code=303)
+    company_id = company_id_for(user)
+    today_s = app_today().isoformat()
+    state = today_work_state(user["id"], company_id, today_s)
+    if state["status"] == "not_started":
+        return RedirectResponse("/mobile/work/start", status_code=303)
+    if state["status"] == "finished":
+        return RedirectResponse(f"/mobile/work/end/complete?day={today_s}", status_code=303)
+    delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user["id"], company_id, today_s))
+    sheet = query_one(
+        """SELECT * FROM inspection_sheets
+           WHERE user_id=? AND company_id=? AND (sheet_date=? OR COALESCE(delivery_date, '')=?)
+           ORDER BY created_at DESC LIMIT 1""",
+        (user["id"], company_id, today_s, today_s),
+    )
+    ocr_result = {"work_date": today_s, "completed": 0, "pickup": 0, "acceptance": 0, "received": 0, "raw_text": ""}
+    if sheet:
+        extracted = extract_inspection_fields(row_value(sheet, "ocr_text", "") or "", fallback_date=row_value(sheet, "delivery_date", "") or sheet["sheet_date"])
+        ocr_result = {
+            "work_date": row_value(sheet, "delivery_date", "") or extracted["work_date"] or today_s,
+            "completed": row_value(sheet, "ocr_completed", 0) or extracted["completed"],
+            "pickup": row_value(sheet, "ocr_pickup", 0) or extracted["pickup"],
+            "acceptance": row_value(sheet, "ocr_acceptance", 0) or extracted["acceptance"],
+            "received": row_value(sheet, "ocr_received", 0) or extracted["received"],
+            "raw_text": (row_value(sheet, "ocr_text", "") or "").strip(),
+        }
+    counts = {
+        "completed": delivery["completed"] if delivery else ocr_result["completed"],
+        "transfer": delivery["transfer"] if delivery else 0,
+        "night": delivery["night"] if delivery else 0,
+        "pickup": delivery["pickup"] if delivery else ocr_result["pickup"],
+        "large": delivery["large"] if delivery else 0,
+    }
+    now_dt = app_now()
+    return render(
+        request,
+        "mobile_work_end.html",
+        {
+            "work_date": today_s,
+            "logged_at": now_dt.strftime("%Y-%m-%dT%H:%M"),
+            "last_odometer": latest_odometer_for_user(user["id"], company_id),
+            "counts": counts,
+            "ocr_result": ocr_result,
+        },
+    )
+
+
+@app.post("/mobile/work/end/preview", response_class=HTMLResponse)
+async def mobile_work_end_preview(
+    request: Request,
+    work_date: str = Form(...),
+    logged_at: str = Form(""),
+    odometer: int = Form(0),
+    alcohol_result: str = Form("0.00"),
+    detector_used: str = Form("有"),
+    completed: int = Form(0),
+    transfer: int = Form(0),
+    night: int = Form(0),
+    pickup: int = Form(0),
+    large: int = Form(0),
+    notes: str = Form(""),
+    inspection_image: Optional[UploadFile] = File(None),
+    user=Depends(require_user),
+):
+    require_feature(user, "safety")
+    require_feature(user, "deliveries")
+    if user["role"] == "admin":
+        raise HTTPException(status_code=403, detail="メンバーとしてログインしてください")
+    company_id = company_id_for(user)
+    state = today_work_state(user["id"], company_id, work_date)
+    if state["status"] == "finished":
+        return RedirectResponse(f"/mobile/work/end/complete?day={work_date}", status_code=303)
+    log_date = work_date
+    image_path = ""
+    original_filename = ""
+    content_type = ""
+    ocr_text = ""
+    ocr_result = {"work_date": work_date, "completed": 0, "pickup": 0, "acceptance": 0, "received": 0, "raw_text": ""}
+    if inspection_image and inspection_image.filename:
+        if not inspection_image.content_type or not inspection_image.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="点検表は画像ファイルを選択してください")
+        suffix = safe_upload_name(inspection_image.filename)
+        if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+            raise HTTPException(status_code=400, detail="点検表画像は jpg, jpeg, png, webp に対応しています")
+        data = await inspection_image.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="画像ファイルが空です")
+        if len(data) > 15 * 1024 * 1024:
+            data = data[: 15 * 1024 * 1024]
+        now_dt = app_now()
+        filename = f"user{user['id']}_{work_date.replace('-', '')}_{now_dt.strftime('%H%M%S%f')}{suffix}"
+        image_path, disk_path = save_image_data_for_ocr(data, filename, inspection_image.content_type or "", "inspection_slips", SLIP_UPLOAD_DIR)
+        original_filename = inspection_image.filename or ""
+        content_type = inspection_image.content_type or ""
+        ocr_text = extract_ocr_text(disk_path)
+        extracted = extract_inspection_fields(ocr_text, fallback_date=work_date)
+        ocr_result = {
+            "work_date": extracted["work_date"] or work_date,
+            "completed": extracted["completed"],
+            "pickup": extracted["pickup"],
+            "acceptance": extracted["acceptance"],
+            "received": extracted["received"],
+            "raw_text": ocr_text.strip(),
+        }
+        if completed == 0 and extracted["completed"]:
+            completed = extracted["completed"]
+        if pickup == 0 and extracted["pickup"]:
+            pickup = extracted["pickup"]
+        if ocr_result["work_date"]:
+            work_date = ocr_result["work_date"]
+    counts = {"completed": completed, "transfer": transfer, "night": night, "pickup": pickup, "large": large}
+    return render(
+        request,
+        "mobile_work_end_confirm.html",
+        {
+            "work_date": work_date,
+            "log_date": log_date,
+            "logged_at": logged_at or app_now().strftime("%Y-%m-%dT%H:%M"),
+            "odometer": max(odometer, 0),
+            "alcohol_result": alcohol_result or "OK",
+            "detector_used": detector_used,
+            "notes": notes,
+            "counts": counts,
+            "ocr_result": ocr_result,
+            "image_path": image_path,
+            "image_info": inspection_image_info(image_path),
+            "original_filename": original_filename,
+            "content_type": content_type,
+        },
+    )
+
+
+@app.post("/mobile/work/end")
+def mobile_work_end_save(
+    work_date: str = Form(...),
+    log_date: str = Form(""),
+    logged_at: str = Form(""),
+    odometer: int = Form(0),
+    alcohol_result: str = Form("0.00"),
+    detector_used: str = Form("有"),
+    completed: int = Form(0),
+    transfer: int = Form(0),
+    night: int = Form(0),
+    pickup: int = Form(0),
+    large: int = Form(0),
+    notes: str = Form(""),
+    image_path: str = Form(""),
+    original_filename: str = Form(""),
+    content_type: str = Form(""),
+    user=Depends(require_user),
+):
+    require_feature(user, "safety")
+    require_feature(user, "deliveries")
+    if user["role"] == "admin":
+        raise HTTPException(status_code=403, detail="メンバーとしてログインしてください")
+    company_id = company_id_for(user)
+    delivery = upsert_delivery_counts(
+        company_id,
+        user["id"],
+        work_date,
+        completed,
+        transfer,
+        night,
+        pickup,
+        large,
+        "none",
+        notes or "スマホ退勤フローから登録",
+        image_path,
+    )
+    if image_path:
+        save_inspection_slip_record(company_id, user["id"], delivery["id"], work_date, image_path, original_filename, content_type)
+    log_work_date = log_date or app_today().isoformat()
+    state = today_work_state(user["id"], company_id, log_work_date)
+    if state["status"] != "finished":
+        execute(
+            """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, odometer, alcohol_result, detector_used,
+               intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                company_id,
+                user["id"],
+                log_work_date,
+                "end",
+                logged_at or app_now().strftime("%Y-%m-%dT%H:%M"),
+                max(odometer, 0),
+                alcohol_result or "OK",
+                detector_used,
+                "無",
+                "良好",
+                "問題なし",
+                "問題なし",
+                "問題なし",
+                "",
+                notes,
+                app_now().isoformat(timespec="seconds"),
+            ),
+        )
+    return RedirectResponse(f"/mobile/work/end/complete?day={work_date}", status_code=303)
+
+
+@app.get("/mobile/work/end/complete", response_class=HTMLResponse)
+def mobile_work_complete(request: Request, day: Optional[str] = None, user=Depends(require_user)):
+    require_feature(user, "deliveries")
+    if user["role"] == "admin":
+        return RedirectResponse("/admin", status_code=303)
+    target = day or app_today().isoformat()
+    company_id = company_id_for(user)
+    delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user["id"], company_id, target))
+    rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (user["id"], company_id))
+    vehicle_rates = query_one("SELECT * FROM vehicle_rates WHERE id=1")
+    reward = calc_reward(delivery, rates, vehicle_rates) if delivery else 0
+    return render(request, "mobile_work_complete.html", {"delivery": delivery, "reward": reward, "target": target})
 
 
 @app.get("/deliveries", response_class=HTMLResponse)
