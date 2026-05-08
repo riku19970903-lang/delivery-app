@@ -2,10 +2,12 @@ import calendar
 import csv
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
-from hashlib import sha256
+from hashlib import pbkdf2_hmac, sha256
+import hmac
 import io
 import json
 import logging
+import secrets
 import os
 from pathlib import Path
 import re
@@ -52,7 +54,16 @@ except ZoneInfoNotFoundError:
 UPLOAD_DIR = BASE_DIR / "uploads" / "inspection_sheets"
 SLIP_UPLOAD_DIR = BASE_DIR / "uploads" / "inspection_slips"
 SUPPORT_UPLOAD_DIR = BASE_DIR / "uploads" / "support_requests"
-SECRET_KEY = "change-this-local-secret"
+SECRET_KEY = (
+    os.getenv("SECRET_KEY")
+    or os.getenv("APP_SECRET_KEY")
+    or os.getenv("SESSION_SECRET")
+    or "local-dev-session-secret-change-me"
+)
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "1" if USE_POSTGRES else "0").lower() in {"1", "true", "yes", "on"}
+PASSWORD_ITERATIONS = int(os.getenv("PASSWORD_ITERATIONS", "200000"))
+DEFAULT_ADMIN_PASSWORD = os.getenv("DEFAULT_ADMIN_PASSWORD", "admin123")
+DEFAULT_MEMBER_PASSWORD = os.getenv("DEFAULT_MEMBER_PASSWORD", "member123")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 SLIP_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 SUPPORT_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -226,7 +237,7 @@ def _append_sql_clause(sql: str, clause: str) -> str:
 
 def _needs_returning_id(sql: str) -> bool:
     return bool(
-        re.match(r"^\s*INSERT\s+INTO\s+(users|vehicle_issues|companies|vehicles)\b", sql, flags=re.IGNORECASE)
+        re.match(r"^\s*INSERT\s+INTO\s+(users|vehicle_issues|companies|vehicles|work_logs|audit_logs)\b", sql, flags=re.IGNORECASE)
         and "RETURNING" not in sql.upper()
         and "ON CONFLICT" not in sql.upper()
     )
@@ -272,7 +283,39 @@ def ensure_db_initialized():
 
 
 def hash_password(password: str) -> str:
-    return sha256(password.encode("utf-8")).hexdigest()
+    salt = secrets.token_hex(16)
+    digest = pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        PASSWORD_ITERATIONS,
+    ).hex()
+    return f"pbkdf2_sha256${PASSWORD_ITERATIONS}${salt}${digest}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    stored_hash = stored_hash or ""
+    if stored_hash.startswith("pbkdf2_sha256$"):
+        parts = stored_hash.split("$")
+        if len(parts) != 4:
+            return False
+        _, iterations, salt, expected = parts
+        try:
+            digest = pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                bytes.fromhex(salt),
+                int(iterations),
+            ).hex()
+        except (TypeError, ValueError):
+            return False
+        return hmac.compare_digest(digest, expected)
+    legacy = sha256(password.encode("utf-8")).hexdigest()
+    return hmac.compare_digest(legacy, stored_hash)
+
+
+def needs_password_rehash(stored_hash: str) -> bool:
+    return not (stored_hash or "").startswith("pbkdf2_sha256$")
 
 
 def safe_upload_name(original_name: str):
@@ -347,6 +390,7 @@ def allowed_local_image_path(path: str):
         and (
             path.startswith("/uploads/inspection_sheets/")
             or path.startswith("/uploads/inspection_slips/")
+            or path.startswith("/uploads/support_requests/")
         )
     )
 
@@ -457,6 +501,56 @@ def query_all(sql: str, params=()):
     ensure_db_initialized()
     with db() as conn:
         return conn.execute(sql, params).fetchall()
+
+
+def row_to_dict(row):
+    if not row:
+        return {}
+    if isinstance(row, dict):
+        return dict(row)
+    try:
+        return {key: row[key] for key in row.keys()}
+    except (AttributeError, KeyError, TypeError):
+        return {}
+
+
+def audit_log(company_id, actor, action, table_name, record_id="", summary="", before=None, after=None, conn=None):
+    payload = (
+        int(company_id or PLATFORM_COMPANY_ID),
+        row_value(actor, "id"),
+        row_value(actor, "role", ""),
+        action,
+        table_name,
+        str(record_id or ""),
+        summary or "",
+        json.dumps(before or {}, ensure_ascii=False, default=str),
+        json.dumps(after or {}, ensure_ascii=False, default=str),
+        app_now().isoformat(timespec="seconds"),
+    )
+    sql = """INSERT INTO audit_logs(company_id, actor_id, actor_role, action, table_name, record_id, summary, before_data, after_data, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+    if conn:
+        conn.execute(sql, payload)
+    else:
+        execute(sql, payload)
+
+
+def vehicle_rates_for_company(company_id: int):
+    row = query_one("SELECT * FROM company_vehicle_rates WHERE company_id=?", (company_id,))
+    if row:
+        return row
+    legacy = query_one("SELECT * FROM vehicle_rates WHERE id=1")
+    if legacy:
+        now = app_now().isoformat(timespec="seconds")
+        execute(
+            """INSERT INTO company_vehicle_rates(company_id, daily_fee, monthly_fee, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(company_id) DO UPDATE SET daily_fee=excluded.daily_fee,
+               monthly_fee=excluded.monthly_fee, updated_at=excluded.updated_at""",
+            (company_id, legacy["daily_fee"], legacy["monthly_fee"], now),
+        )
+        return query_one("SELECT * FROM company_vehicle_rates WHERE company_id=?", (company_id,))
+    return {"company_id": company_id, "daily_fee": 1500, "monthly_fee": 30000}
 
 
 def feature_price_label(feature):
@@ -636,6 +730,7 @@ def ensure_vehicle_issue_schema():
         conn.execute(
             """CREATE TABLE IF NOT EXISTS vehicle_issue_status_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL DEFAULT 1,
                 issue_id INTEGER NOT NULL,
                 status TEXT NOT NULL,
                 changed_by INTEGER NOT NULL,
@@ -645,6 +740,7 @@ def ensure_vehicle_issue_schema():
                 FOREIGN KEY(changed_by) REFERENCES users(id)
             )"""
         )
+        ensure_column(conn, "vehicle_issue_status_logs", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "vehicle_issue_status_logs", "note", "TEXT DEFAULT ''")
         conn.commit()
 
@@ -732,6 +828,13 @@ def _init_db_schema():
                 id INTEGER PRIMARY KEY CHECK(id = 1),
                 daily_fee INTEGER NOT NULL DEFAULT 1500,
                 monthly_fee INTEGER NOT NULL DEFAULT 30000
+            );
+            CREATE TABLE IF NOT EXISTS company_vehicle_rates (
+                company_id INTEGER PRIMARY KEY,
+                daily_fee INTEGER NOT NULL DEFAULT 1500,
+                monthly_fee INTEGER NOT NULL DEFAULT 30000,
+                updated_at TEXT DEFAULT '',
+                FOREIGN KEY(company_id) REFERENCES companies(id)
             );
             CREATE TABLE IF NOT EXISTS vehicles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -854,12 +957,14 @@ def _init_db_schema():
             );
             CREATE TABLE IF NOT EXISTS depots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL DEFAULT 1,
                 name TEXT NOT NULL UNIQUE,
                 active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS districts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL DEFAULT 1,
                 depot_id INTEGER,
                 name TEXT NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1,
@@ -869,6 +974,7 @@ def _init_db_schema():
             );
             CREATE TABLE IF NOT EXISTS towns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL DEFAULT 1,
                 district_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1,
@@ -877,14 +983,17 @@ def _init_db_schema():
                 FOREIGN KEY(district_id) REFERENCES districts(id)
             );
             CREATE TABLE IF NOT EXISTS shift_towns (
+                company_id INTEGER NOT NULL DEFAULT 1,
                 shift_id INTEGER NOT NULL,
                 town_id INTEGER NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY(shift_id, town_id),
                 FOREIGN KEY(shift_id) REFERENCES shifts(id) ON DELETE CASCADE,
                 FOREIGN KEY(town_id) REFERENCES towns(id)
             );
             CREATE TABLE IF NOT EXISTS vehicle_issue_status_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL DEFAULT 1,
                 issue_id INTEGER NOT NULL,
                 status TEXT NOT NULL,
                 changed_by INTEGER NOT NULL,
@@ -971,6 +1080,20 @@ def _init_db_schema():
                 FOREIGN KEY(company_id) REFERENCES companies(id),
                 FOREIGN KEY(sender_id) REFERENCES users(id)
             );
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL DEFAULT 1,
+                actor_id INTEGER,
+                actor_role TEXT DEFAULT '',
+                action TEXT NOT NULL,
+                table_name TEXT NOT NULL,
+                record_id TEXT DEFAULT '',
+                summary TEXT DEFAULT '',
+                before_data TEXT DEFAULT '',
+                after_data TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(actor_id) REFERENCES users(id)
+            );
             """
         )
         ensure_column(conn, "companies", "code", "TEXT DEFAULT ''")
@@ -999,6 +1122,10 @@ def _init_db_schema():
         ensure_column(conn, "rates", "vehicle_rental_type", "TEXT NOT NULL DEFAULT 'none'")
         ensure_column(conn, "rates", "vehicle_daily_fee", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "rates", "vehicle_monthly_fee", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "vehicle_rates", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "company_vehicle_rates", "daily_fee", "INTEGER NOT NULL DEFAULT 1500")
+        ensure_column(conn, "company_vehicle_rates", "monthly_fee", "INTEGER NOT NULL DEFAULT 30000")
+        ensure_column(conn, "company_vehicle_rates", "updated_at", "TEXT DEFAULT ''")
         ensure_column(conn, "work_logs", "alcohol_result", "TEXT DEFAULT ''")
         ensure_column(conn, "work_logs", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "work_logs", "vehicle_id", "INTEGER")
@@ -1049,6 +1176,11 @@ def _init_db_schema():
         ensure_column(conn, "shifts", "area_label", "TEXT DEFAULT ''")
         ensure_column(conn, "shifts", "decided", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "shifts", "updated_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "depots", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "districts", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "towns", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "shift_towns", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "shift_towns", "active", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "inspection_sheets", "file_path", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_sheets", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "inspection_sheets", "delivery_date", "TEXT DEFAULT ''")
@@ -1069,22 +1201,42 @@ def _init_db_schema():
         ensure_column(conn, "vehicle_issues", "status", "TEXT NOT NULL DEFAULT '未対応'")
         ensure_column(conn, "vehicle_issues", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "holiday_requests", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "vehicle_issue_status_logs", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "audit_logs", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "audit_logs", "actor_id", "INTEGER")
+        ensure_column(conn, "audit_logs", "actor_role", "TEXT DEFAULT ''")
+        ensure_column(conn, "audit_logs", "action", "TEXT DEFAULT ''")
+        ensure_column(conn, "audit_logs", "table_name", "TEXT DEFAULT ''")
+        ensure_column(conn, "audit_logs", "record_id", "TEXT DEFAULT ''")
+        ensure_column(conn, "audit_logs", "summary", "TEXT DEFAULT ''")
+        ensure_column(conn, "audit_logs", "before_data", "TEXT DEFAULT ''")
+        ensure_column(conn, "audit_logs", "after_data", "TEXT DEFAULT ''")
+        ensure_column(conn, "audit_logs", "created_at", "TEXT DEFAULT ''")
         conn.execute("INSERT OR IGNORE INTO companies(id, name, created_at) VALUES (1, ?, ?)", ("SPARKLE DRIVE", datetime.now().isoformat(timespec="seconds")))
         conn.execute("UPDATE companies SET status='利用中' WHERE COALESCE(status, '')=''")
         seed_feature_prices(conn)
         for company in conn.execute("SELECT id FROM companies").fetchall():
             seed_company_features(conn, company["id"], 1)
+            default_depot_name = "未設定拠点" if int(company["id"]) == PLATFORM_COMPANY_ID else f"未設定拠点 {company['id']}"
+            conn.execute(
+                "INSERT OR IGNORE INTO depots(company_id, name, created_at) VALUES (?, ?, ?)",
+                (company["id"], default_depot_name, datetime.now().isoformat(timespec="seconds")),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO company_vehicle_rates(company_id, daily_fee, monthly_fee, updated_at) VALUES (?, 1500, 30000, ?)",
+                (company["id"], datetime.now().isoformat(timespec="seconds")),
+            )
         admin = conn.execute("SELECT id FROM users WHERE username = 'admin'").fetchone()
         if not admin:
             now = datetime.now().isoformat(timespec="seconds")
             cur = conn.execute(
                 "INSERT INTO users(name, username, password_hash, role, phone, vehicle, created_at) VALUES (?,?,?,?,?,?,?)",
-                ("管理者", "admin", hash_password("admin123"), "admin", "", "", now),
+                ("管理者", "admin", hash_password(DEFAULT_ADMIN_PASSWORD), "admin", "", "", now),
             )
             conn.execute("INSERT OR IGNORE INTO rates(user_id) VALUES (?)", (cur.lastrowid,))
             samples = [
-                ("佐藤 花子", "sato", "member123", "070-1111-2222", "軽バン 12-34"),
-                ("鈴木 一郎", "suzuki", "member123", "070-3333-4444", "軽バン 56-78"),
+                ("佐藤 花子", "sato", DEFAULT_MEMBER_PASSWORD, "070-1111-2222", "軽バン 12-34"),
+                ("鈴木 一郎", "suzuki", DEFAULT_MEMBER_PASSWORD, "070-3333-4444", "軽バン 56-78"),
             ]
             for name, username, password, phone, vehicle in samples:
                 cur = conn.execute(
@@ -1109,20 +1261,21 @@ def _init_db_schema():
                 (member["company_id"], vehicle_name),
             ).fetchone()
             if vehicle and not member["last_vehicle_id"]:
-                conn.execute("UPDATE users SET last_vehicle_id=? WHERE id=?", (vehicle["id"], member["id"]))
-        conn.execute("INSERT OR IGNORE INTO vehicle_rates(id, daily_fee, monthly_fee) VALUES (1, 1500, 30000)")
+                conn.execute("UPDATE users SET last_vehicle_id=? WHERE id=? AND company_id=?", (vehicle["id"], member["id"], member["company_id"]))
+        conn.execute("INSERT OR IGNORE INTO vehicle_rates(id, daily_fee, monthly_fee, company_id) VALUES (1, 1500, 30000, 1)")
+        conn.execute("INSERT OR IGNORE INTO company_vehicle_rates(company_id, daily_fee, monthly_fee, updated_at) VALUES (1, 1500, 30000, ?)", (now,))
         now = datetime.now().isoformat(timespec="seconds")
-        cur = conn.execute("INSERT OR IGNORE INTO depots(name, created_at) VALUES (?, ?)", ("未設定拠点", now))
-        depot = conn.execute("SELECT id FROM depots WHERE name = ?", ("未設定拠点",)).fetchone()
+        cur = conn.execute("INSERT OR IGNORE INTO depots(company_id, name, created_at) VALUES (?, ?, ?)", (1, "未設定拠点", now))
+        depot = conn.execute("SELECT id FROM depots WHERE company_id=? AND name = ?", (1, "未設定拠点")).fetchone()
         seed_areas = {
             "高松": ["高松1丁目", "高松2丁目", "高松3丁目", "高松4丁目", "高松5丁目", "高松6丁目"],
             "土支田": ["土支田2丁目", "土支田3丁目"],
         }
         for district_name, town_names in seed_areas.items():
-            conn.execute("INSERT OR IGNORE INTO districts(depot_id, name, created_at) VALUES (?, ?, ?)", (depot["id"], district_name, now))
-            district = conn.execute("SELECT id FROM districts WHERE depot_id = ? AND name = ?", (depot["id"], district_name)).fetchone()
+            conn.execute("INSERT OR IGNORE INTO districts(company_id, depot_id, name, created_at) VALUES (?, ?, ?, ?)", (1, depot["id"], district_name, now))
+            district = conn.execute("SELECT id FROM districts WHERE company_id=? AND depot_id = ? AND name = ?", (1, depot["id"], district_name)).fetchone()
             for town_name in town_names:
-                conn.execute("INSERT OR IGNORE INTO towns(district_id, name, created_at) VALUES (?, ?, ?)", (district["id"], town_name, now))
+                conn.execute("INSERT OR IGNORE INTO towns(company_id, district_id, name, created_at) VALUES (?, ?, ?, ?)", (1, district["id"], town_name, now))
         conn.commit()
     ensure_vehicle_issue_schema()
 
@@ -1275,14 +1428,20 @@ def calendar_days_for_month(start: date):
     return [start.replace(day=day) for day in range(1, last_day + 1)]
 
 
-def active_towns():
+def active_towns(company_id: Optional[int] = None):
+    where = "t.active=1 AND d.active=1"
+    params = []
+    if company_id is not None:
+        where += " AND t.company_id=? AND d.company_id=? AND COALESCE(p.company_id, t.company_id)=?"
+        params.extend([company_id, company_id, company_id])
     return query_all(
-        """SELECT t.id, t.name, d.id AS district_id, d.name AS district_name, p.name AS depot_name
+        f"""SELECT t.id, t.name, d.id AS district_id, d.name AS district_name, p.name AS depot_name
            FROM towns t
            JOIN districts d ON d.id = t.district_id
            LEFT JOIN depots p ON p.id = d.depot_id
-           WHERE t.active=1 AND d.active=1
-           ORDER BY p.name, d.name, t.name"""
+           WHERE {where}
+           ORDER BY p.name, d.name, t.name""",
+        params,
     )
 
 
@@ -1298,6 +1457,7 @@ def attach_shift_areas(shifts):
             JOIN towns t ON t.id = st.town_id
             JOIN districts d ON d.id = t.district_id
             WHERE st.shift_id IN ({placeholders})
+              AND COALESCE(st.active,1)=1
             ORDER BY d.name, t.name""",
         shift_ids,
     )
@@ -1557,7 +1717,7 @@ def current_shift_conflicts(rows, company_id=1):
 
 def build_shift_import_preview(raw_rows, company_id=1):
     members = query_all("SELECT id, name FROM users WHERE role='member' AND active=1 AND COALESCE(purged,0)=0 AND company_id=? ORDER BY name LIMIT 200", (company_id,))
-    towns = active_towns()
+    towns = active_towns(company_id)
     towns_by_id = {int(town["id"]): town for town in towns}
     preview_rows = []
     for index, raw in enumerate(raw_rows, start=2):
@@ -1619,23 +1779,29 @@ def build_shift_import_preview(raw_rows, company_id=1):
     }
 
 
-def get_town_rows_by_ids(town_ids):
+def get_town_rows_by_ids(town_ids, company_id: Optional[int] = None):
     town_ids = [int(town_id) for town_id in town_ids]
     if not town_ids:
         return []
     placeholders = ",".join("?" for _ in town_ids)
+    company_filter = ""
+    params = list(town_ids)
+    if company_id is not None:
+        company_filter = " AND t.company_id=? AND d.company_id=?"
+        params.extend([company_id, company_id])
     return query_all(
         f"""SELECT t.id, t.name, d.id AS district_id, d.name AS district_name
             FROM towns t JOIN districts d ON d.id=t.district_id
-            WHERE t.id IN ({placeholders}) AND t.active=1 AND d.active=1
+            WHERE t.id IN ({placeholders}) AND t.active=1 AND d.active=1 {company_filter}
             ORDER BY d.name, t.name""",
-        town_ids,
+        params,
     )
 
 
-def upsert_shift_with_towns(conn, member_id, shift_date, status, town_rows, note="", company_id=1):
+def upsert_shift_with_towns(conn, member_id, shift_date, status, town_rows, note="", company_id=1, actor=None):
     first_town = town_rows[0] if town_rows else None
     area_label = "・".join(f"{town['district_name']} / {town['name']}" for town in town_rows)
+    existing = conn.execute("SELECT * FROM shifts WHERE user_id=? AND shift_date=? AND company_id=?", (member_id, shift_date, company_id)).fetchone()
     conn.execute(
         """INSERT INTO shifts(company_id, user_id, shift_date, status, start_time, end_time, note, district_id, town_id, area_label, decided, updated_at)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
@@ -1657,22 +1823,41 @@ def upsert_shift_with_towns(conn, member_id, shift_date, status, town_rows, note
             app_now().isoformat(timespec="seconds"),
         ),
     )
-    shift = conn.execute("SELECT id FROM shifts WHERE user_id=? AND shift_date=? AND company_id=?", (member_id, shift_date, company_id)).fetchone()
+    shift = conn.execute("SELECT * FROM shifts WHERE user_id=? AND shift_date=? AND company_id=?", (member_id, shift_date, company_id)).fetchone()
+    conn.execute("UPDATE shift_towns SET active=0 WHERE shift_id=? AND company_id=?", (shift["id"], company_id))
     if status != "休み":
         for town in town_rows:
-            conn.execute("INSERT OR IGNORE INTO shift_towns(shift_id, town_id) VALUES (?, ?)", (shift["id"], town["id"]))
+            conn.execute(
+                """INSERT INTO shift_towns(company_id, shift_id, town_id, active) VALUES (?, ?, ?, 1)
+                   ON CONFLICT(shift_id, town_id) DO UPDATE SET company_id=excluded.company_id, active=1""",
+                (company_id, shift["id"], town["id"]),
+            )
+    audit_log(
+        company_id,
+        actor or {"id": member_id, "role": ""},
+        "shift.update" if existing else "shift.create",
+        "shifts",
+        shift["id"],
+        "Shift saved",
+        before=row_to_dict(existing),
+        after=row_to_dict(shift),
+        conn=conn,
+    )
 
 
-def upsert_shift_record(member_id, shift_date, status, town_ids, note="", company_id=1):
+def upsert_shift_record(member_id, shift_date, status, town_ids, note="", company_id=1, actor=None):
     if status not in SHIFT_ALLOWED_STATUSES:
         raise HTTPException(status_code=400, detail="出勤区分が正しくありません")
     if status != "休み" and not town_ids:
         raise HTTPException(status_code=400, detail="休み以外は町会・配達エリアを1つ以上選択してください")
-    town_rows = get_town_rows_by_ids(town_ids)
+    member = query_one("SELECT id FROM users WHERE id=? AND role='member' AND company_id=? AND active=1 AND COALESCE(purged,0)=0", (member_id, company_id))
+    if not member:
+        raise HTTPException(status_code=404, detail="メンバーが見つかりません")
+    town_rows = get_town_rows_by_ids(town_ids, company_id)
     if status != "休み" and len(town_rows) != len(set(int(town_id) for town_id in town_ids)):
         raise HTTPException(status_code=400, detail="選択された町会・配達エリアが正しくありません")
     with db() as conn:
-        upsert_shift_with_towns(conn, member_id, shift_date, status, town_rows, note, company_id)
+        upsert_shift_with_towns(conn, member_id, shift_date, status, town_rows, note, company_id, actor)
         conn.commit()
 
 
@@ -2118,6 +2303,18 @@ def upsert_delivery_counts(company_id: int, user_id: int, work_date: str, comple
         delivery = conn.execute("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user_id, company_id, work_date)).fetchone()
         if existing and delivery:
             insert_delivery_correction(conn, company_id, delivery["id"], user_id, actor_id or user_id, work_date, existing, values, source)
+        if delivery:
+            audit_log(
+                company_id,
+                {"id": actor_id or user_id, "role": ""},
+                "delivery.update" if existing else "delivery.create",
+                "deliveries",
+                delivery["id"],
+                source or "Delivery counts saved",
+                before=row_to_dict(existing),
+                after=row_to_dict(delivery),
+                conn=conn,
+            )
         conn.commit()
         return delivery
 
@@ -2136,6 +2333,16 @@ def save_inspection_slip_record(company_id: int, user_id: int, delivery_id: int,
             (company_id, user_id, delivery_id, work_date, image_path, original_filename, content_type, now),
         )
         conn.execute("UPDATE deliveries SET inspection_sheet_path=?, updated_at=? WHERE id=? AND company_id=?", (image_path, now, delivery_id, company_id))
+        audit_log(
+            company_id,
+            {"id": user_id, "role": ""},
+            "inspection_slip.upsert",
+            "inspection_slips",
+            delivery_id,
+            "Inspection slip image saved",
+            after={"delivery_id": delivery_id, "work_date": work_date, "image_path": image_path},
+            conn=conn,
+        )
         conn.commit()
 
 
@@ -2283,12 +2490,21 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
            WHERE u.username = ? AND u.active = 1""",
         (username,),
     )
-    if not user or user["password_hash"] != hash_password(password):
+    if not user or not verify_password(password, user["password_hash"]):
         return render(request, "login.html", {"error": "IDまたはパスワードが違います"})
     if row_value(user, "company_active", 1) == 0:
         return render(request, "login.html", {"error": "この会社アカウントは停止中です"})
+    if needs_password_rehash(user["password_hash"]):
+        execute("UPDATE users SET password_hash=? WHERE id=?", (hash_password(password), user["id"]))
     res = RedirectResponse("/", status_code=303)
-    res.set_cookie("session", serializer.dumps(user["id"]), httponly=True, samesite="lax")
+    res.set_cookie(
+        "session",
+        serializer.dumps(user["id"]),
+        httponly=True,
+        samesite="lax",
+        secure=SESSION_COOKIE_SECURE,
+        max_age=60 * 60 * 24 * 7,
+    )
     return res
 
 
@@ -2531,7 +2747,7 @@ def save_member(
     try:
         cur = execute(
             "INSERT INTO users(company_id, name, username, password_hash, role, phone, vehicle, created_at) VALUES (?,?,?,?,?,?,?,?)",
-            (company_id, name, username, hash_password(password or "member123"), "member", phone, vehicle, now),
+            (company_id, name, username, hash_password(password or DEFAULT_MEMBER_PASSWORD), "member", phone, vehicle, now),
         )
         execute("INSERT OR IGNORE INTO rates(user_id, company_id) VALUES (?, ?)", (cur.lastrowid, company_id))
         ensure_vehicle_for_user(company_id, cur.lastrowid, vehicle)
@@ -2767,6 +2983,24 @@ def save_company(
     )
     with db() as conn:
         seed_company_features(conn, new_company_id, 1)
+        conn.execute(
+            "INSERT OR IGNORE INTO company_vehicle_rates(company_id, daily_fee, monthly_fee, updated_at) VALUES (?, 1500, 30000, ?)",
+            (new_company_id, now),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO depots(company_id, name, created_at) VALUES (?, ?, ?)",
+            (new_company_id, f"未設定拠点 {new_company_id}", now),
+        )
+        audit_log(
+            company_id_for(user),
+            user,
+            "company.create",
+            "companies",
+            new_company_id,
+            "Company created",
+            after={"name": name, "code": code, "status": status},
+            conn=conn,
+        )
         conn.commit()
     return RedirectResponse("/admin/settings?message=" + quote("会社と管理者を追加しました"), status_code=303)
 
@@ -2990,7 +3224,7 @@ def update_own_password(
     confirm_password: str = Form(...),
     user=Depends(require_user),
 ):
-    if user["password_hash"] != hash_password(current_password):
+    if not verify_password(current_password, user["password_hash"]):
         return RedirectResponse("/settings?error=" + quote("現在のパスワードが違います"), status_code=303)
     if not new_password:
         return RedirectResponse("/settings?error=" + quote("新しいパスワードを入力してください"), status_code=303)
@@ -3030,6 +3264,7 @@ def save_rates(
     member = query_one("SELECT id FROM users WHERE id=? AND role='member' AND company_id=?", (user_id, company_id))
     if not member:
         raise HTTPException(status_code=404, detail="メンバーが見つかりません")
+    before = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (user_id, company_id))
     execute(
         """INSERT INTO rates(user_id, company_id, delivery_unit, transfer_unit, night_unit, pickup_unit, large_unit,
            vehicle_rental_type, vehicle_daily_fee, vehicle_monthly_fee)
@@ -3043,20 +3278,50 @@ def save_rates(
            vehicle_monthly_fee=excluded.vehicle_monthly_fee""",
         (user_id, company_id, delivery_unit, transfer_unit, night_unit, pickup_unit, large_unit, vehicle_rental_type, vehicle_daily_fee, vehicle_monthly_fee),
     )
+    after = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (user_id, company_id))
+    audit_log(
+        company_id,
+        user,
+        "payroll.rates_update",
+        "rates",
+        user_id,
+        "Member reward rates updated",
+        before=row_to_dict(before),
+        after=row_to_dict(after),
+    )
     return RedirectResponse("/admin/rates", status_code=303)
 
 
 @app.get("/admin/vehicle-rates", response_class=HTMLResponse)
 def vehicle_rates_page(request: Request, user=Depends(require_admin)):
     require_feature(user, "vehicle")
-    rates = query_one("SELECT * FROM vehicle_rates WHERE id=1")
+    rates = vehicle_rates_for_company(company_id_for(user))
     return render(request, "vehicle_rates.html", {"rates": rates})
 
 
 @app.post("/admin/vehicle-rates")
 def save_vehicle_rates(daily_fee: int = Form(...), monthly_fee: int = Form(...), user=Depends(require_admin)):
     require_feature(user, "vehicle")
-    execute("UPDATE vehicle_rates SET daily_fee=?, monthly_fee=? WHERE id=1", (daily_fee, monthly_fee))
+    company_id = company_id_for(user)
+    before = vehicle_rates_for_company(company_id)
+    now = app_now().isoformat(timespec="seconds")
+    execute(
+        """INSERT INTO company_vehicle_rates(company_id, daily_fee, monthly_fee, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(company_id) DO UPDATE SET daily_fee=excluded.daily_fee,
+           monthly_fee=excluded.monthly_fee, updated_at=excluded.updated_at""",
+        (company_id, daily_fee, monthly_fee, now),
+    )
+    audit_log(
+        company_id,
+        user,
+        "payroll.vehicle_rates_update",
+        "company_vehicle_rates",
+        company_id,
+        "Company vehicle rates updated",
+        before=row_to_dict(before),
+        after={"daily_fee": daily_fee, "monthly_fee": monthly_fee},
+    )
     return RedirectResponse("/admin/vehicle-rates", status_code=303)
 
 
@@ -3091,6 +3356,7 @@ def save_vehicle(
     if not name:
         raise HTTPException(status_code=400, detail="車両名を入力してください")
     active_value = 1 if active == "1" else 0
+    before = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=?", (vehicle_id, company_id)) if vehicle_id else query_one("SELECT * FROM vehicles WHERE company_id=? AND name=?", (company_id, name))
     if vehicle_id:
         execute(
             """UPDATE vehicles
@@ -3134,6 +3400,17 @@ def save_vehicle(
                 now,
             ),
         )
+    after = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=?", (vehicle_id, company_id)) if vehicle_id else query_one("SELECT * FROM vehicles WHERE company_id=? AND name=?", (company_id, name))
+    audit_log(
+        company_id,
+        user,
+        "vehicle.update" if before else "vehicle.create",
+        "vehicles",
+        row_value(after, "id", vehicle_id),
+        "Vehicle saved",
+        before=row_to_dict(before),
+        after=row_to_dict(after),
+    )
     return RedirectResponse("/admin/vehicles", status_code=303)
 
 
@@ -3167,6 +3444,7 @@ def mobile_vehicle_change(vehicle_id: int = Form(...), user=Depends(require_user
     vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=? AND active=1", (vehicle_id, company_id))
     if not vehicle:
         raise HTTPException(status_code=404, detail="車両が見つかりません")
+    before_user = row_to_dict(user)
     today_s = app_today().isoformat()
     with db() as conn:
         conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=? AND company_id=?", (vehicle["id"], vehicle["name"], user["id"], company_id))
@@ -3178,6 +3456,17 @@ def mobile_vehicle_change(vehicle_id: int = Form(...), user=Depends(require_user
                    ORDER BY logged_at DESC LIMIT 1
                )""",
             (vehicle["id"], vehicle_label(vehicle), user["id"], company_id, today_s),
+        )
+        audit_log(
+            company_id,
+            user,
+            "vehicle.member_change",
+            "users",
+            user["id"],
+            "Member selected vehicle",
+            before=before_user,
+            after={"last_vehicle_id": vehicle["id"], "vehicle": vehicle["name"]},
+            conn=conn,
         )
         conn.commit()
     return RedirectResponse("/member", status_code=303)
@@ -3192,7 +3481,7 @@ def member_home(request: Request, user=Depends(require_user)):
     company_id = company_id_for(user)
     delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user["id"], company_id, today_s))
     rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (user["id"], company_id))
-    vehicle_rates = query_one("SELECT * FROM vehicle_rates WHERE id=1")
+    vehicle_rates = vehicle_rates_for_company(company_id)
     reward = calc_reward(delivery, rates, vehicle_rates) if delivery else 0
     month_summary = monthly_reward_summary(user["id"], app_today(), company_id)
     shifts = upcoming_member_shifts(user["id"], today_s, company_id)
@@ -3279,15 +3568,25 @@ def save_work_log(
     vehicle_name = vehicle_label(vehicle) if vehicle else ""
     now = app_now().isoformat(timespec="seconds")
     with db() as conn:
-        conn.execute(
+        cur = conn.execute(
             """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, vehicle_id, vehicle_name, alcohol_result, detector_used,
                intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at, odometer)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (company_id, user["id"], work_date, log_type, logged_at, vehicle["id"] if vehicle else None, vehicle_name, alcohol_result, detector_used, intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, now, max(odometer, 0)),
         )
         if vehicle:
-            conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=?", (vehicle["id"], vehicle["name"], user["id"]))
+            conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=? AND company_id=?", (vehicle["id"], vehicle["name"], user["id"], company_id))
         update_vehicle_odometer(conn, company_id, vehicle["id"] if vehicle else None, vehicle_name, odometer, now)
+        audit_log(
+            company_id,
+            user,
+            f"work_log.{log_type}",
+            "work_logs",
+            cur.lastrowid,
+            "Work log saved",
+            after={"work_date": work_date, "log_type": log_type, "logged_at": logged_at, "vehicle_id": vehicle["id"] if vehicle else None, "odometer": max(odometer, 0)},
+            conn=conn,
+        )
         conn.commit()
     return RedirectResponse("/work-log", status_code=303)
 
@@ -3344,7 +3643,7 @@ def mobile_work_start(
     notes = " / ".join(part for part in [vehicle_note, notes.strip()] if part)
     now = app_now().isoformat(timespec="seconds")
     with db() as conn:
-        conn.execute(
+        cur = conn.execute(
             """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, vehicle_id, vehicle_name, odometer, alcohol_result, detector_used,
                intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -3370,8 +3669,18 @@ def mobile_work_start(
             ),
         )
         if vehicle:
-            conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=?", (vehicle["id"], vehicle["name"], user["id"]))
+            conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=? AND company_id=?", (vehicle["id"], vehicle["name"], user["id"], company_id))
         update_vehicle_odometer(conn, company_id, vehicle["id"] if vehicle else None, vehicle_name, odometer, now)
+        audit_log(
+            company_id,
+            user,
+            "work_log.start",
+            "work_logs",
+            cur.lastrowid,
+            "Mobile start work log saved",
+            after={"work_date": work_date, "logged_at": logged_at, "vehicle_id": vehicle["id"] if vehicle else None, "odometer": max(odometer, 0)},
+            conn=conn,
+        )
         conn.commit()
     return RedirectResponse("/mobile/work/start/complete", status_code=303)
 
@@ -3577,7 +3886,7 @@ def mobile_work_end_save(
     if state["status"] != "finished":
         now = app_now().isoformat(timespec="seconds")
         with db() as conn:
-            conn.execute(
+            cur = conn.execute(
                 """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, vehicle_id, vehicle_name, odometer, alcohol_result, detector_used,
                    intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -3603,8 +3912,18 @@ def mobile_work_end_save(
                 ),
             )
             if vehicle:
-                conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=?", (vehicle["id"], vehicle["name"], user["id"]))
+                conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=? AND company_id=?", (vehicle["id"], vehicle["name"], user["id"], company_id))
             update_vehicle_odometer(conn, company_id, vehicle["id"] if vehicle else None, vehicle_name, odometer, now)
+            audit_log(
+                company_id,
+                user,
+                "work_log.end",
+                "work_logs",
+                cur.lastrowid,
+                "Mobile end work log saved",
+                after={"work_date": log_work_date, "logged_at": logged_at, "vehicle_id": vehicle["id"] if vehicle else None, "odometer": max(odometer, 0)},
+                conn=conn,
+            )
             conn.commit()
     return RedirectResponse(f"/mobile/work/end/complete?day={work_date}", status_code=303)
 
@@ -3618,7 +3937,7 @@ def mobile_work_complete(request: Request, day: Optional[str] = None, user=Depen
     company_id = company_id_for(user)
     delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user["id"], company_id, target))
     rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (user["id"], company_id))
-    vehicle_rates = query_one("SELECT * FROM vehicle_rates WHERE id=1")
+    vehicle_rates = vehicle_rates_for_company(company_id)
     reward = calc_reward(delivery, rates, vehicle_rates) if delivery else 0
     return render(request, "mobile_work_complete.html", {"delivery": delivery, "reward": reward, "target": target})
 
@@ -3654,7 +3973,7 @@ def delivery_page(request: Request, day: Optional[str] = None, user=Depends(requ
     slip = query_one("SELECT * FROM inspection_slips WHERE user_id=? AND company_id=? AND slip_date=?", (user["id"], company_id, target))
     sheet = query_one("SELECT * FROM inspection_sheets WHERE user_id=? AND company_id=? AND sheet_date=?", (user["id"], company_id, target))
     rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (user["id"], company_id))
-    vehicle_rates = query_one("SELECT * FROM vehicle_rates WHERE id=1")
+    vehicle_rates = vehicle_rates_for_company(company_id)
     reward = calc_reward(delivery, rates, vehicle_rates) if delivery else 0
     inspection_image_path = ""
     if slip:
@@ -3749,6 +4068,16 @@ async def save_delivery(
                     (company_id, user["id"], delivery["id"], work_date, public_path, inspection_image.filename or "", inspection_image.content_type or "", now),
                 )
                 conn.execute("UPDATE deliveries SET inspection_sheet_path=?, updated_at=? WHERE id=? AND company_id=?", (public_path, now, delivery["id"], company_id))
+                audit_log(
+                    company_id,
+                    user,
+                    "inspection_slip.upsert",
+                    "inspection_slips",
+                    delivery["id"],
+                    "Inspection slip image saved",
+                    after={"delivery_id": delivery["id"], "work_date": work_date, "image_path": public_path},
+                    conn=conn,
+                )
                 conn.commit()
     return RedirectResponse(f"/deliveries?day={work_date}", status_code=303)
 
@@ -3863,6 +4192,16 @@ async def upload_inspection_sheet(sheet_date: str = Form(...), image: UploadFile
             ),
         )
         sheet = conn.execute("SELECT id FROM inspection_sheets WHERE user_id=? AND company_id=? AND sheet_date=?", (user["id"], company_id, sheet_date)).fetchone()
+        audit_log(
+            company_id,
+            user,
+            "inspection_sheet.upload",
+            "inspection_sheets",
+            sheet["id"],
+            "Inspection sheet uploaded",
+            after={"sheet_date": sheet_date, "delivery_date": delivery_date, "file_path": public_path},
+            conn=conn,
+        )
         conn.commit()
     return RedirectResponse(f"/inspection-sheets/{sheet['id']}/correct", status_code=303)
 
@@ -3978,6 +4317,17 @@ def apply_inspection_sheet_counts(
                 company_id,
             ),
         )
+        audit_log(
+            company_id,
+            user,
+            "inspection_sheet.apply_counts",
+            "inspection_sheets",
+            sheet_id,
+            "Inspection OCR counts applied",
+            before=row_to_dict(sheet),
+            after={"delivery_date": target_date, **values},
+            conn=conn,
+        )
         conn.commit()
     return RedirectResponse(f"/deliveries?day={target_date}", status_code=303)
 
@@ -4001,7 +4351,7 @@ def rewards_page(request: Request, ym: Optional[str] = None, member_id: Optional
         (viewing_user_id, company_id, start.isoformat(), end.isoformat()),
     )
     rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (viewing_user_id, company_id))
-    vehicle_rates = query_one("SELECT * FROM vehicle_rates WHERE id=1")
+    vehicle_rates = vehicle_rates_for_company(company_id)
     daily = []
     total = 0
     monthly_deducted = False
@@ -4019,10 +4369,15 @@ def rewards_page(request: Request, ym: Optional[str] = None, member_id: Optional
 def vehicle_issues_page(request: Request, user=Depends(require_user)):
     require_feature(user, "issues")
     ensure_vehicle_issue_schema()
+    company_id = company_id_for(user)
     if user["role"] == "admin":
-        issues = query_all("""SELECT v.*, u.name FROM vehicle_issues v JOIN users u ON u.id=v.user_id WHERE v.company_id=? ORDER BY v.created_at DESC LIMIT 100""", (company_id_for(user),))
+        issues = query_all("""SELECT v.*, u.name FROM vehicle_issues v JOIN users u ON u.id=v.user_id WHERE v.company_id=? ORDER BY v.created_at DESC LIMIT 100""", (company_id,))
+        history_filter = "v.company_id=?"
+        history_params = (company_id,)
     else:
-        issues = query_all("SELECT * FROM vehicle_issues WHERE user_id=? ORDER BY created_at DESC", (user["id"],))
+        issues = query_all("SELECT * FROM vehicle_issues WHERE user_id=? AND company_id=? ORDER BY created_at DESC", (user["id"], company_id))
+        history_filter = "v.company_id=? AND v.user_id=?"
+        history_params = (company_id, user["id"])
     normalized_issues = []
     for issue in issues:
         item = dict(issue)
@@ -4033,8 +4388,8 @@ def vehicle_issues_page(request: Request, user=Depends(require_user)):
         """SELECT l.*, u.name AS changed_by_name FROM vehicle_issue_status_logs l
            JOIN users u ON u.id=l.changed_by
            JOIN vehicle_issues v ON v.id=l.issue_id
-           WHERE v.company_id=? ORDER BY l.changed_at DESC LIMIT 200""",
-        (company_id_for(user),),
+           WHERE """ + history_filter + " ORDER BY l.changed_at DESC LIMIT 200",
+        history_params,
     )
     history_by_issue = {}
     for history in histories:
@@ -4048,17 +4403,28 @@ def vehicle_issues_page(request: Request, user=Depends(require_user)):
 def save_vehicle_issue(issue_date: str = Form(...), vehicle_name: str = Form(...), severity: str = Form(...), detail: str = Form(...), user=Depends(require_user)):
     require_feature(user, "issues")
     ensure_vehicle_issue_schema()
+    company_id = company_id_for(user)
     if user["role"] == "admin":
         raise HTTPException(status_code=403, detail="メンバーとして入力してください")
     now = datetime.now().isoformat(timespec="seconds")
     with db() as conn:
         cur = conn.execute(
             "INSERT INTO vehicle_issues(company_id, user_id, issue_date, vehicle_name, severity, detail, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
-            (company_id_for(user), user["id"], issue_date, vehicle_name, severity, detail, "未対応", now),
+            (company_id, user["id"], issue_date, vehicle_name, severity, detail, "未対応", now),
         )
         conn.execute(
-            "INSERT INTO vehicle_issue_status_logs(issue_id, status, changed_by, changed_at) VALUES (?, ?, ?, ?)",
-            (cur.lastrowid, "未対応", user["id"], now),
+            "INSERT INTO vehicle_issue_status_logs(company_id, issue_id, status, changed_by, changed_at) VALUES (?, ?, ?, ?, ?)",
+            (company_id, cur.lastrowid, "未対応", user["id"], now),
+        )
+        audit_log(
+            company_id,
+            user,
+            "vehicle_issue.create",
+            "vehicle_issues",
+            cur.lastrowid,
+            "Vehicle issue submitted",
+            after={"issue_date": issue_date, "vehicle_name": vehicle_name, "severity": severity},
+            conn=conn,
         )
         conn.commit()
     return RedirectResponse("/vehicle-issues", status_code=303)
@@ -4070,15 +4436,27 @@ def update_vehicle_issue_status(issue_id: int, status: str = Form(...), user=Dep
     ensure_vehicle_issue_schema()
     if status not in ISSUE_STATUSES:
         raise HTTPException(status_code=400, detail="状態が正しくありません")
-    issue = query_one("SELECT id FROM vehicle_issues WHERE id=? AND company_id=?", (issue_id, company_id_for(user)))
+    company_id = company_id_for(user)
+    issue = query_one("SELECT * FROM vehicle_issues WHERE id=? AND company_id=?", (issue_id, company_id))
     if not issue:
         raise HTTPException(status_code=404, detail="車両不具合が見つかりません")
     now = datetime.now().isoformat(timespec="seconds")
     with db() as conn:
-        conn.execute("UPDATE vehicle_issues SET status=? WHERE id=? AND company_id=?", (status, issue_id, company_id_for(user)))
+        conn.execute("UPDATE vehicle_issues SET status=? WHERE id=? AND company_id=?", (status, issue_id, company_id))
         conn.execute(
-            "INSERT INTO vehicle_issue_status_logs(issue_id, status, changed_by, changed_at) VALUES (?, ?, ?, ?)",
-            (issue_id, status, user["id"], now),
+            "INSERT INTO vehicle_issue_status_logs(company_id, issue_id, status, changed_by, changed_at) VALUES (?, ?, ?, ?, ?)",
+            (company_id, issue_id, status, user["id"], now),
+        )
+        audit_log(
+            company_id,
+            user,
+            "vehicle_issue.status_update",
+            "vehicle_issues",
+            issue_id,
+            "Vehicle issue status changed",
+            before=row_to_dict(issue),
+            after={"status": status},
+            conn=conn,
         )
         conn.commit()
     return RedirectResponse("/vehicle-issues", status_code=303)
@@ -4097,7 +4475,10 @@ def holidays_page(request: Request, user=Depends(require_user)):
             (company_id, start.isoformat(), end.isoformat()),
         )
     else:
-        rows = query_all("SELECT * FROM holiday_requests WHERE user_id=? ORDER BY request_date", (user["id"],))
+        rows = query_all(
+            "SELECT * FROM holiday_requests WHERE user_id=? AND company_id=? AND request_date BETWEEN ? AND ? ORDER BY request_date",
+            (user["id"], company_id_for(user), start.isoformat(), end.isoformat()),
+        )
     holiday_days = simple_japanese_holidays(start.year)
     rows_by_date = {}
     for row in rows:
@@ -4171,7 +4552,7 @@ def shifts_page(request: Request, ym: Optional[str] = None, message: str = "", u
                 "holidays": holidays,
                 "ym": start.strftime("%Y-%m"),
                 "days": calendar_days_for_month(start),
-                "towns": active_towns(),
+                "towns": active_towns(company_id),
                 "shifts_by_date": shifts_by_date(shifts),
                 "message": message,
                 "holiday_status": holiday_submission_status(company_id, start),
@@ -4182,9 +4563,9 @@ def shifts_page(request: Request, ym: Optional[str] = None, message: str = "", u
            FROM shifts s
            LEFT JOIN districts d ON d.id=s.district_id
            LEFT JOIN towns t ON t.id=s.town_id
-           WHERE s.user_id=? AND s.shift_date BETWEEN ? AND ? AND s.decided=1
+           WHERE s.user_id=? AND s.company_id=? AND s.shift_date BETWEEN ? AND ? AND s.decided=1
            ORDER BY s.shift_date""",
-        (user["id"], start.isoformat(), end.isoformat()),
+        (user["id"], company_id_for(user), start.isoformat(), end.isoformat()),
     )
     shifts = attach_shift_areas(shifts)
     return render(request, "member_shifts.html", {"shifts": shifts, "ym": start.strftime("%Y-%m"), "days": calendar_days_for_month(start), "shifts_by_date": shifts_by_date(shifts)})
@@ -4276,17 +4657,23 @@ def commit_shift_import(request: Request, payload: str = Form(...), overwrite_co
             },
         )
 
-    towns_by_id = {int(town["id"]): town for town in active_towns()}
+    towns_by_id = {int(town["id"]): town for town in active_towns(company_id)}
     with db() as conn:
         for row in rows:
             status = row.get("status", "")
             if status not in SHIFT_ALLOWED_STATUSES:
                 raise HTTPException(status_code=400, detail="出勤区分が正しくありません")
+            member = conn.execute(
+                "SELECT id FROM users WHERE id=? AND role='member' AND company_id=? AND active=1 AND COALESCE(purged,0)=0",
+                (int(row["member_id"]), company_id),
+            ).fetchone()
+            if not member:
+                raise HTTPException(status_code=403, detail="他社または無効なメンバーのシフトは登録できません")
             town_ids = [int(town_id) for town_id in row.get("town_ids", [])]
             town_rows = [towns_by_id[town_id] for town_id in town_ids if town_id in towns_by_id]
             if status != "休み" and len(town_rows) != len(set(town_ids)):
                 raise HTTPException(status_code=400, detail="配達エリアが正しくありません")
-            upsert_shift_with_towns(conn, int(row["member_id"]), row["shift_date"], status, town_rows, row.get("note", ""), company_id)
+            upsert_shift_with_towns(conn, int(row["member_id"]), row["shift_date"], status, town_rows, row.get("note", ""), company_id, user)
         conn.commit()
     ym = rows[0]["shift_date"][:7] if rows and rows[0].get("shift_date") else app_today().strftime("%Y-%m")
     message = quote(f"{len(rows)}件のシフトを取り込みました")
@@ -4302,24 +4689,27 @@ def save_shift(
     user=Depends(require_admin),
 ):
     require_feature(user, "shifts")
-    upsert_shift_record(member_id, shift_date, status, town_ids, company_id=company_id_for(user))
+    upsert_shift_record(member_id, shift_date, status, town_ids, company_id=company_id_for(user), actor=user)
     return RedirectResponse("/shifts", status_code=303)
 
 
 @app.get("/admin/areas", response_class=HTMLResponse)
 def areas_page(request: Request, user=Depends(require_admin)):
     require_feature(user, "multi_depot")
-    depots = query_all("SELECT * FROM depots WHERE active=1 ORDER BY name")
+    company_id = company_id_for(user)
+    depots = query_all("SELECT * FROM depots WHERE active=1 AND company_id=? ORDER BY name", (company_id,))
     districts = query_all(
         """SELECT d.*, p.name AS depot_name FROM districts d
            LEFT JOIN depots p ON p.id=d.depot_id
-           WHERE d.active=1 ORDER BY p.name, d.name"""
+           WHERE d.active=1 AND d.company_id=? ORDER BY p.name, d.name""",
+        (company_id,),
     )
     towns = query_all(
         """SELECT t.*, d.name AS district_name, p.name AS depot_name FROM towns t
            JOIN districts d ON d.id=t.district_id
            LEFT JOIN depots p ON p.id=d.depot_id
-           WHERE t.active=1 AND d.active=1 ORDER BY p.name, d.name, t.name"""
+           WHERE t.active=1 AND d.active=1 AND t.company_id=? ORDER BY p.name, d.name, t.name""",
+        (company_id,),
     )
     return render(request, "areas.html", {"depots": depots, "districts": districts, "towns": towns})
 
@@ -4327,37 +4717,46 @@ def areas_page(request: Request, user=Depends(require_admin)):
 @app.post("/admin/areas/districts")
 def save_district(district_id: str = Form(""), depot_id: int = Form(...), name: str = Form(...), user=Depends(require_admin)):
     require_feature(user, "multi_depot")
+    company_id = company_id_for(user)
+    depot = query_one("SELECT id FROM depots WHERE id=? AND company_id=? AND active=1", (depot_id, company_id))
+    if not depot:
+        raise HTTPException(status_code=403, detail="他社の拠点は変更できません")
     now = datetime.now().isoformat(timespec="seconds")
     if district_id:
-        execute("UPDATE districts SET depot_id=?, name=? WHERE id=?", (depot_id, name, district_id))
+        execute("UPDATE districts SET depot_id=?, name=? WHERE id=? AND company_id=?", (depot_id, name, district_id, company_id))
     else:
-        execute("INSERT OR IGNORE INTO districts(depot_id, name, created_at) VALUES (?, ?, ?)", (depot_id, name, now))
+        execute("INSERT OR IGNORE INTO districts(company_id, depot_id, name, created_at) VALUES (?, ?, ?, ?)", (company_id, depot_id, name, now))
     return RedirectResponse("/admin/areas", status_code=303)
 
 
 @app.post("/admin/areas/districts/{district_id}/delete")
 def delete_district(district_id: int, user=Depends(require_admin)):
     require_feature(user, "multi_depot")
-    execute("UPDATE districts SET active=0 WHERE id=?", (district_id,))
-    execute("UPDATE towns SET active=0 WHERE district_id=?", (district_id,))
+    company_id = company_id_for(user)
+    execute("UPDATE districts SET active=0 WHERE id=? AND company_id=?", (district_id, company_id))
+    execute("UPDATE towns SET active=0 WHERE district_id=? AND company_id=?", (district_id, company_id))
     return RedirectResponse("/admin/areas", status_code=303)
 
 
 @app.post("/admin/areas/towns")
 def save_town(town_id: str = Form(""), district_id: int = Form(...), name: str = Form(...), user=Depends(require_admin)):
     require_feature(user, "multi_depot")
+    company_id = company_id_for(user)
+    district = query_one("SELECT id FROM districts WHERE id=? AND company_id=? AND active=1", (district_id, company_id))
+    if not district:
+        raise HTTPException(status_code=403, detail="他社の配達エリアは変更できません")
     now = datetime.now().isoformat(timespec="seconds")
     if town_id:
-        execute("UPDATE towns SET district_id=?, name=? WHERE id=?", (district_id, name, town_id))
+        execute("UPDATE towns SET district_id=?, name=? WHERE id=? AND company_id=?", (district_id, name, town_id, company_id))
     else:
-        execute("INSERT OR IGNORE INTO towns(district_id, name, created_at) VALUES (?, ?, ?)", (district_id, name, now))
+        execute("INSERT OR IGNORE INTO towns(company_id, district_id, name, created_at) VALUES (?, ?, ?, ?)", (company_id, district_id, name, now))
     return RedirectResponse("/admin/areas", status_code=303)
 
 
 @app.post("/admin/areas/towns/{town_id}/delete")
 def delete_town(town_id: int, user=Depends(require_admin)):
     require_feature(user, "multi_depot")
-    execute("UPDATE towns SET active=0 WHERE id=?", (town_id,))
+    execute("UPDATE towns SET active=0 WHERE id=? AND company_id=?", (town_id, company_id_for(user)))
     return RedirectResponse("/admin/areas", status_code=303)
 
 
