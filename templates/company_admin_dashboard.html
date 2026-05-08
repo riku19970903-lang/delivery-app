@@ -43,6 +43,32 @@
   </section>
   {% endif %}
 
+  <section class="admin-mobile-section">
+    <h2>未入力一覧</h2>
+    <div class="admin-alert-list">
+      <div class="admin-alert-card red">
+        <b>まだ出勤していない人</b>
+        <span>{% for m in mobile_missing_status.not_started %}{{ m.name }}{% if not loop.last %}、{% endif %}{% else %}なし{% endfor %}</span>
+      </div>
+      <div class="admin-alert-card orange">
+        <b>まだ退勤していない人</b>
+        <span>{% for m in mobile_missing_status.not_finished %}{{ m.name }}{% if not loop.last %}、{% endif %}{% else %}なし{% endfor %}</span>
+      </div>
+      <div class="admin-alert-card yellow">
+        <b>個数未入力の人</b>
+        <span>{% for m in mobile_missing_status.delivery_missing %}{{ m.name }}{% if not loop.last %}、{% endif %}{% else %}なし{% endfor %}</span>
+      </div>
+      <div class="admin-alert-card yellow">
+        <b>点呼未入力の人</b>
+        <span>{% for m in mobile_missing_status.roll_call_missing %}{{ m.name }}{% if not loop.last %}、{% endif %}{% else %}なし{% endfor %}</span>
+      </div>
+      <div class="admin-alert-card yellow">
+        <b>点検表未提出の人</b>
+        <span>{% for m in mobile_missing_status.inspection_missing %}{{ m.name }}{% if not loop.last %}、{% endif %}{% else %}なし{% endfor %}</span>
+      </div>
+    </div>
+  </section>
+
   {% if feature_enabled('vehicle') %}
   <section class="admin-mobile-section">
     <h2>車両アラート</h2>

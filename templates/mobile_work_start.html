@@ -84,8 +84,11 @@
       show();
       window.scrollTo({top: 0, behavior: "smooth"});
     }));
-    form.addEventListener("submit", () => {
-      if (form.dataset.saving === "1") return;
+    form.addEventListener("submit", (event) => {
+      if (form.dataset.saving === "1") {
+        event.preventDefault();
+        return;
+      }
       form.dataset.saving = "1";
       form.querySelectorAll("button").forEach((button) => {
         button.disabled = true;

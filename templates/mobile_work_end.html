@@ -99,8 +99,11 @@
       show();
       window.scrollTo({top: 0, behavior: "smooth"});
     }));
-    form.addEventListener("submit", () => {
-      if (form.dataset.saving === "1") return;
+    form.addEventListener("submit", (event) => {
+      if (form.dataset.saving === "1") {
+        event.preventDefault();
+        return;
+      }
       form.action = imageInput && imageInput.files && imageInput.files.length ? "/mobile/work/end/preview" : "/mobile/work/end";
       form.dataset.saving = "1";
       form.querySelectorAll("button").forEach((button) => {

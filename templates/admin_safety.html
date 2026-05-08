@@ -28,7 +28,57 @@
   </label>
   <button class="primary">国交省様式 日報PDF</button>
 </form>
-<section class="panel tablewrap"><table><tr><th>日時</th><th>名前</th><th>区分</th><th>結果</th><th>検知器</th><th>酒気</th><th>体調</th><th>顔色</th><th>呼気</th><th>声</th><th>管理者</th><th>備考</th></tr>
-{% for l in logs %}<tr><td>{{ l.logged_at }}</td><td>{{ l.name }}</td><td>{{ "出勤" if l.log_type == "start" else "退勤" }}</td><td>{{ l.alcohol_result }}</td><td>{{ l.detector_used }}</td><td>{{ l.intoxicated }}</td><td>{{ l.health_status }}</td><td>{{ l.face_check }}</td><td>{{ l.breath_check }}</td><td>{{ l.voice_check }}</td><td>{{ l.admin_confirm }}</td><td>{{ l.notes }}</td></tr>{% endfor %}
+<section class="panel tablewrap"><table><tr><th>日時</th><th>名前</th><th>区分</th><th>車両</th><th>走行距離</th><th>結果</th><th>検知器</th><th>酒気</th><th>体調</th><th>顔色</th><th>呼気</th><th>声</th><th>管理者</th><th>備考</th><th>修正</th></tr>
+{% for l in logs %}
+<tr>
+  <td>{{ l.logged_at }}</td>
+  <td>{{ l.name }}</td>
+  <td>{{ "出勤" if l.log_type == "start" else "退勤" }}</td>
+  <td>{{ l.vehicle_name or "-" }}</td>
+  <td>入力 {{ l.odometer or 0 }}km<br><small>開始 {{ l.start_odometer or 0 }} / 終了 {{ l.end_odometer or 0 }} / 走行 {{ l.distance_km or 0 }}km</small></td>
+  <td>{{ l.alcohol_result }}</td>
+  <td>{{ l.detector_used }}</td>
+  <td>{{ l.intoxicated }}</td>
+  <td>{{ l.health_status }}</td>
+  <td>{{ l.face_check }}</td>
+  <td>{{ l.breath_check }}</td>
+  <td>{{ l.voice_check }}</td>
+  <td>{{ l.admin_confirm }}</td>
+  <td>{{ l.notes }}</td>
+  <td>
+    <details class="inline-edit">
+      <summary>修正</summary>
+      <form class="mini-form stacked" method="post" action="/admin/work-logs/{{ l.id }}/update">
+        <input type="datetime-local" name="logged_at" value="{{ l.logged_at[:16] if l.logged_at else '' }}">
+        <select name="vehicle_id">
+          <option value="0">車両変更なし</option>
+          {% for v in vehicles %}
+          <option value="{{ v.id }}" {% if l.vehicle_id and v.id == l.vehicle_id %}selected{% endif %}>{{ v.name }}{% if v.plate_number %} / {{ v.plate_number }}{% endif %}</option>
+          {% endfor %}
+        </select>
+        <input type="number" name="odometer" value="{{ l.odometer or 0 }}" min="0" inputmode="numeric" placeholder="走行距離">
+        <input name="alcohol_result" value="{{ l.alcohol_result }}" placeholder="アルコール結果">
+        <input name="detector_used" value="{{ l.detector_used }}" placeholder="検知器">
+        <input name="health_status" value="{{ l.health_status }}" placeholder="体調">
+        <textarea name="notes" placeholder="備考">{{ l.notes }}</textarea>
+        <button>修正保存</button>
+      </form>
+    </details>
+  </td>
+</tr>
+{% endfor %}
 </table></section>
+
+<section class="panel">
+  <h2>最近の修正履歴</h2>
+  {% for a in audit_rows %}
+  <details class="history-line">
+    <summary>{{ a.created_at }} / {{ a.actor_name or a.actor_id }} / {{ a.action }} / {{ a.table_name }} #{{ a.record_id }}</summary>
+    <pre>修正前: {{ a.before_data }}
+修正後: {{ a.after_data }}</pre>
+  </details>
+  {% else %}
+  <p class="hint">修正履歴はまだありません。</p>
+  {% endfor %}
+</section>
 {% endblock %}

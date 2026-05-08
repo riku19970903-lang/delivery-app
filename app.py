@@ -1462,8 +1462,75 @@ def require_platform_admin(user=Depends(require_admin)):
     return user
 
 
+def image_path_authorized(user, path: str):
+    path = (path or "").strip()
+    if not path or not (is_remote_image_path(path) or allowed_local_image_path(path)):
+        return False
+    company_id = company_id_for(user)
+    storage_path = storage_path_from_url(path)
+    user_file_marker = f"user{user['id']}_"
+    if user["role"] == "member" and user_file_marker in path and (allowed_local_image_path(path) or storage_path):
+        return True
+    matches = [path]
+    if storage_path:
+        matches.append(storage_path)
+    placeholders = ",".join("?" for _ in matches)
+    role_clause = "" if user["role"] == "admin" else " AND user_id=?"
+    params = [company_id, *matches]
+    if user["role"] != "admin":
+        params.append(user["id"])
+    for table in ("inspection_sheets", "inspection_slips"):
+        row = query_one(
+            f"""SELECT id FROM {table}
+                WHERE company_id=? AND (file_path IN ({placeholders}) OR public_url IN ({placeholders}) OR storage_path IN ({placeholders}))
+                {role_clause}
+                LIMIT 1""",
+            [company_id, *matches, *matches, *matches] + ([user["id"]] if user["role"] != "admin" else []),
+        )
+        if row:
+            return True
+    delivery_clause = "" if user["role"] == "admin" else " AND user_id=?"
+    delivery_row = query_one(
+        f"""SELECT id FROM deliveries
+            WHERE company_id=? AND inspection_sheet_path IN ({placeholders})
+            {delivery_clause}
+            LIMIT 1""",
+        params if user["role"] != "admin" else [company_id, *matches],
+    )
+    if delivery_row:
+        return True
+    if user["role"] == "admin":
+        if is_platform_admin(user):
+            support_row = query_one(
+                f"""SELECT id FROM support_requests
+                    WHERE image_path IN ({placeholders})
+                    LIMIT 1""",
+                matches,
+            )
+            if support_row:
+                return True
+        support_row = query_one(
+            f"""SELECT id FROM support_requests
+                WHERE company_id=? AND image_path IN ({placeholders})
+                LIMIT 1""",
+            [company_id, *matches],
+        )
+        if support_row:
+            return True
+    return False
+
+
 @app.get("/inspection-file", response_class=HTMLResponse)
 def inspection_file(request: Request, path: str = "", user=Depends(require_user)):
+    if not image_path_authorized(user, path):
+        return render(
+            request,
+            "image_missing.html",
+            {
+                "path": path,
+                "message": "画像が見つかりません。再アップロードしてください。",
+            },
+        )
     if is_remote_image_path(path):
         try:
             head = UrlRequest(path, method="HEAD")
@@ -1547,8 +1614,8 @@ def active_towns(company_id: Optional[int] = None):
     return query_all(
         f"""SELECT t.id, t.name, d.id AS district_id, d.name AS district_name, p.name AS depot_name
            FROM towns t
-           JOIN districts d ON d.id = t.district_id
-           LEFT JOIN depots p ON p.id = d.depot_id
+           JOIN districts d ON d.id = t.district_id AND d.company_id = t.company_id
+           LEFT JOIN depots p ON p.id = d.depot_id AND p.company_id = d.company_id
            WHERE {where}
            ORDER BY p.name, d.name, t.name""",
         params,
@@ -1564,8 +1631,9 @@ def attach_shift_areas(shifts):
     area_rows = query_all(
         f"""SELECT st.shift_id, d.name AS district_name, t.name AS town_name
             FROM shift_towns st
-            JOIN towns t ON t.id = st.town_id
-            JOIN districts d ON d.id = t.district_id
+            JOIN shifts s ON s.id = st.shift_id AND s.company_id = st.company_id
+            JOIN towns t ON t.id = st.town_id AND t.company_id = st.company_id
+            JOIN districts d ON d.id = t.district_id AND d.company_id = st.company_id
             WHERE st.shift_id IN ({placeholders})
               AND COALESCE(st.active,1)=1
             ORDER BY d.name, t.name""",
@@ -2070,8 +2138,8 @@ def upcoming_member_shifts(user_id: int, today_s: str, company_id: Optional[int]
     rows = query_all(
         f"""SELECT s.*, d.name AS district_name, t.name AS town_name
            FROM shifts s
-           LEFT JOIN districts d ON d.id=s.district_id
-           LEFT JOIN towns t ON t.id=s.town_id
+           LEFT JOIN districts d ON d.id=s.district_id AND d.company_id=s.company_id
+           LEFT JOIN towns t ON t.id=s.town_id AND t.company_id=s.company_id
            WHERE s.user_id=? AND s.shift_date>=? AND s.decided=1
            {company_filter}
            ORDER BY s.shift_date LIMIT 3""",
@@ -2894,30 +2962,45 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
         """SELECT d.*, u.name, COALESCE(s.file_path, d.inspection_sheet_path) AS slip_path
            FROM deliveries d
            JOIN users u ON u.id = d.user_id
-           LEFT JOIN inspection_slips s ON s.delivery_id=d.id
+           LEFT JOIN inspection_slips s ON s.delivery_id=d.id AND s.company_id=d.company_id
            WHERE d.work_date = ? AND d.company_id=? ORDER BY u.name LIMIT 100""",
         (today_s, company_id),
     )
     deliveries = attach_image_info(deliveries, "slip_path")
     mobile_delivery_status = query_all(
-        """SELECT u.id, u.name, d.id AS delivery_id,
-                  COALESCE(d.completed, 0) AS completed,
-                  COALESCE(d.night, 0) AS night,
-                  COALESCE(d.pickup, 0) AS pickup,
-                  COALESCE(d.large, 0) AS large
+        """SELECT u.id, u.name,
+                  MAX(CASE WHEN w.log_type='start' THEN 1 ELSE 0 END) AS has_start,
+                  MAX(CASE WHEN w.log_type='end' THEN 1 ELSE 0 END) AS has_end,
+                  MAX(d.id) AS delivery_id,
+                  COALESCE(MAX(d.completed), 0) AS completed,
+                  COALESCE(MAX(d.night), 0) AS night,
+                  COALESCE(MAX(d.pickup), 0) AS pickup,
+                  COALESCE(MAX(d.large), 0) AS large,
+                  MAX(CASE WHEN COALESCE(sl.file_path, '')<>'' OR COALESCE(sh.file_path, '')<>'' OR COALESCE(d.inspection_sheet_path, '')<>'' THEN 1 ELSE 0 END) AS has_inspection
            FROM users u
-           LEFT JOIN deliveries d ON d.user_id=u.id AND d.company_id=? AND d.work_date=?
+           LEFT JOIN work_logs w ON w.user_id=u.id AND w.company_id=u.company_id AND w.work_date=?
+           LEFT JOIN deliveries d ON d.user_id=u.id AND d.company_id=u.company_id AND d.work_date=?
+           LEFT JOIN inspection_slips sl ON sl.user_id=u.id AND sl.company_id=u.company_id AND sl.slip_date=?
+           LEFT JOIN inspection_sheets sh ON sh.user_id=u.id AND sh.company_id=u.company_id AND (sh.sheet_date=? OR COALESCE(sh.delivery_date, '')=?)
            WHERE u.company_id=? AND u.role='member' AND u.active=1 AND COALESCE(u.purged,0)=0
+           GROUP BY u.id, u.name
            ORDER BY u.name LIMIT 200""",
-        (company_id, today_s, company_id),
+        (today_s, today_s, today_s, today_s, today_s, company_id),
     )
+    mobile_missing_status = {
+        "not_started": [row for row in mobile_delivery_status if not int_value(row["has_start"])],
+        "not_finished": [row for row in mobile_delivery_status if int_value(row["has_start"]) and not int_value(row["has_end"])],
+        "delivery_missing": [row for row in mobile_delivery_status if not row_value(row, "delivery_id")],
+        "roll_call_missing": [row for row in mobile_delivery_status if not int_value(row["has_start"]) or not int_value(row["has_end"])],
+        "inspection_missing": [row for row in mobile_delivery_status if not int_value(row["has_inspection"])],
+    }
     upcoming_shifts = attach_shift_areas(
         query_all(
             """SELECT s.*, u.name, d.name AS district_name, t.name AS town_name
                FROM shifts s
                JOIN users u ON u.id=s.user_id
-               LEFT JOIN districts d ON d.id=s.district_id
-               LEFT JOIN towns t ON t.id=s.town_id
+               LEFT JOIN districts d ON d.id=s.district_id AND d.company_id=s.company_id
+               LEFT JOIN towns t ON t.id=s.town_id AND t.company_id=s.company_id
                WHERE s.company_id=? AND s.shift_date BETWEEN ? AND ? AND s.decided=1
                ORDER BY s.shift_date, u.name LIMIT 120""",
             (company_id, tomorrow_s, day_after_s),
@@ -2987,6 +3070,7 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
             "vehicle_alerts": vehicle_alerts[:5],
             "holiday_status": holiday_status,
             "mobile_delivery_status": mobile_delivery_status,
+            "mobile_missing_status": mobile_missing_status,
             "mobile_shift_days": shifts_by_mobile_day,
             "open_vehicle_issues": open_vehicle_issues,
             "priority_notifications": notifications,
@@ -3797,6 +3881,8 @@ def member_home(request: Request, user=Depends(require_user)):
     selected_vehicle_alert = vehicle_alert(selected_vehicle)
     holiday_alert = holiday_deadline_alert(now_dt.date())
     last_odometer = latest_vehicle_odometer(company_id, row_value(selected_vehicle, "id")) or latest_odometer_for_user(user["id"], company_id)
+    company = query_one("SELECT memo FROM companies WHERE id=?", (company_id,))
+    company_notice = (row_value(company, "memo", "") or "").strip()
     return render(
         request,
         "member_home.html",
@@ -3821,6 +3907,7 @@ def member_home(request: Request, user=Depends(require_user)):
             "vehicle_inspection_due": row_value(selected_vehicle, "inspection_due", "") or row_value(user, "vehicle_inspection_due", "") or "未設定",
             "vehicles": vehicles,
             "selected_vehicle": selected_vehicle,
+            "company_notice": company_notice,
         },
     )
 
@@ -4292,10 +4379,10 @@ def delivery_page(request: Request, day: Optional[str] = None, user=Depends(requ
         company_id = company_id_for(user)
         rows = query_all(
             """SELECT d.*, u.name, COALESCE(s.file_path, d.inspection_sheet_path) AS slip_path,
-                      (SELECT COUNT(*) FROM delivery_corrections c WHERE c.delivery_id=d.id) AS correction_count
+                      (SELECT COUNT(*) FROM delivery_corrections c WHERE c.delivery_id=d.id AND c.company_id=d.company_id) AS correction_count
                FROM deliveries d
                JOIN users u ON u.id=d.user_id
-               LEFT JOIN inspection_slips s ON s.delivery_id=d.id
+               LEFT JOIN inspection_slips s ON s.delivery_id=d.id AND s.company_id=d.company_id
                WHERE d.work_date=? AND d.company_id=? ORDER BY u.name LIMIT 300""",
             (target, company_id),
         )
@@ -4571,8 +4658,8 @@ def inspection_sheet_for_user(sheet_id: int, user):
         sheet = query_one(
             """SELECT s.*, u.name AS member_name FROM inspection_sheets s
                JOIN users u ON u.id=s.user_id
-               WHERE s.id=? AND s.user_id=?""",
-            (sheet_id, user["id"]),
+               WHERE s.id=? AND s.user_id=? AND s.company_id=?""",
+            (sheet_id, user["id"], company_id_for(user)),
         )
     if not sheet:
         raise HTTPException(status_code=404, detail="点検表が見つかりません")
@@ -4889,8 +4976,8 @@ def shifts_page(request: Request, ym: Optional[str] = None, message: str = "", u
             """SELECT s.*, u.name, d.name AS district_name, t.name AS town_name
                FROM shifts s
                JOIN users u ON u.id=s.user_id
-               LEFT JOIN districts d ON d.id=s.district_id
-               LEFT JOIN towns t ON t.id=s.town_id
+               LEFT JOIN districts d ON d.id=s.district_id AND d.company_id=s.company_id
+               LEFT JOIN towns t ON t.id=s.town_id AND t.company_id=s.company_id
                WHERE s.company_id=? AND s.shift_date BETWEEN ? AND ? ORDER BY s.shift_date, u.name""",
             (company_id, start.isoformat(), end.isoformat()),
         )
@@ -4914,8 +5001,8 @@ def shifts_page(request: Request, ym: Optional[str] = None, message: str = "", u
     shifts = query_all(
         """SELECT s.*, d.name AS district_name, t.name AS town_name
            FROM shifts s
-           LEFT JOIN districts d ON d.id=s.district_id
-           LEFT JOIN towns t ON t.id=s.town_id
+           LEFT JOIN districts d ON d.id=s.district_id AND d.company_id=s.company_id
+           LEFT JOIN towns t ON t.id=s.town_id AND t.company_id=s.company_id
            WHERE s.user_id=? AND s.company_id=? AND s.shift_date BETWEEN ? AND ? AND s.decided=1
            ORDER BY s.shift_date""",
         (user["id"], company_id_for(user), start.isoformat(), end.isoformat()),
@@ -5053,14 +5140,14 @@ def areas_page(request: Request, user=Depends(require_admin)):
     depots = query_all("SELECT * FROM depots WHERE active=1 AND company_id=? ORDER BY name", (company_id,))
     districts = query_all(
         """SELECT d.*, p.name AS depot_name FROM districts d
-           LEFT JOIN depots p ON p.id=d.depot_id
+           LEFT JOIN depots p ON p.id=d.depot_id AND p.company_id=d.company_id
            WHERE d.active=1 AND d.company_id=? ORDER BY p.name, d.name""",
         (company_id,),
     )
     towns = query_all(
         """SELECT t.*, d.name AS district_name, p.name AS depot_name FROM towns t
-           JOIN districts d ON d.id=t.district_id
-           LEFT JOIN depots p ON p.id=d.depot_id
+           JOIN districts d ON d.id=t.district_id AND d.company_id=t.company_id
+           LEFT JOIN depots p ON p.id=d.depot_id AND p.company_id=d.company_id
            WHERE t.active=1 AND d.active=1 AND t.company_id=? ORDER BY p.name, d.name, t.name""",
         (company_id,),
     )
@@ -5243,6 +5330,76 @@ def build_daily_report_rows(company_id: int, start_date: str, end_date: str, mem
     return rows
 
 
+@app.post("/admin/work-logs/{log_id}/update")
+def admin_update_work_log(
+    log_id: int,
+    logged_at: str = Form(""),
+    vehicle_id: int = Form(0),
+    odometer: int = Form(0),
+    alcohol_result: str = Form(""),
+    detector_used: str = Form(""),
+    health_status: str = Form(""),
+    notes: str = Form(""),
+    user=Depends(require_admin),
+):
+    require_feature(user, "safety")
+    company_id = company_id_for(user)
+    before = query_one("SELECT * FROM work_logs WHERE id=? AND company_id=?", (log_id, company_id))
+    if not before:
+        raise HTTPException(status_code=404, detail="Work log not found")
+    vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=?", (vehicle_id, company_id)) if vehicle_id else None
+    vehicle_name = vehicle_label(vehicle) if vehicle else row_value(before, "vehicle_name", "")
+    work_date = row_value(before, "work_date", "")
+    log_type = row_value(before, "log_type", "")
+    odometer = max(int_value(odometer), 0)
+    logged_at = logged_at or row_value(before, "logged_at", "")
+    alcohol_result = alcohol_result or row_value(before, "alcohol_result", "")
+    detector_used = detector_used or row_value(before, "detector_used", "")
+    health_status = health_status or row_value(before, "health_status", "")
+    with db() as conn:
+        start_odo, end_odo, distance_km = odometer_log_values(conn, company_id, before["user_id"], work_date, log_type, odometer)
+        conn.execute(
+            """UPDATE work_logs
+               SET logged_at=?, vehicle_id=?, vehicle_name=?, odometer=?, start_odometer=?, end_odometer=?,
+                   distance_km=?, alcohol_result=?, detector_used=?, health_status=?, notes=?
+               WHERE id=? AND company_id=?""",
+            (logged_at, vehicle["id"] if vehicle else row_value(before, "vehicle_id"), vehicle_name, odometer, start_odo, end_odo, distance_km, alcohol_result, detector_used, health_status, notes, log_id, company_id),
+        )
+        if log_type == "start":
+            end_log = conn.execute(
+                """SELECT * FROM work_logs
+                   WHERE company_id=? AND user_id=? AND work_date=? AND log_type='end'
+                   ORDER BY logged_at DESC LIMIT 1""",
+                (company_id, before["user_id"], work_date),
+            ).fetchone()
+            if end_log:
+                end_start, end_end, end_distance = odometer_log_values(conn, company_id, before["user_id"], work_date, "end", row_value(end_log, "odometer"))
+                conn.execute(
+                    "UPDATE work_logs SET start_odometer=?, end_odometer=?, distance_km=? WHERE id=? AND company_id=?",
+                    (end_start, end_end, end_distance, end_log["id"], company_id),
+                )
+        if vehicle:
+            conn.execute(
+                "UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=? AND company_id=?",
+                (vehicle["id"], vehicle["name"], before["user_id"], company_id),
+            )
+        update_vehicle_odometer(conn, company_id, vehicle["id"] if vehicle else row_value(before, "vehicle_id"), vehicle_name, odometer, app_now().isoformat(timespec="seconds"))
+        after = conn.execute("SELECT * FROM work_logs WHERE id=? AND company_id=?", (log_id, company_id)).fetchone()
+        audit_log(
+            company_id,
+            user,
+            "work_log.update",
+            "work_logs",
+            log_id,
+            "Work log corrected",
+            before=row_to_dict(before),
+            after=row_to_dict(after),
+            conn=conn,
+        )
+        conn.commit()
+    return RedirectResponse("/admin/safety", status_code=303)
+
+
 @app.get("/admin/safety", response_class=HTMLResponse)
 def admin_safety(request: Request, user=Depends(require_admin)):
     require_feature(user, "safety")
@@ -5250,7 +5407,17 @@ def admin_safety(request: Request, user=Depends(require_admin)):
     logs = query_all("""SELECT w.*, u.name FROM work_logs w JOIN users u ON u.id=w.user_id WHERE w.company_id=? ORDER BY w.logged_at DESC LIMIT 100""", (company_id,))
     members = query_all("SELECT id, name FROM users WHERE role='member' AND company_id=? ORDER BY active DESC, name LIMIT 200", (company_id,))
     vehicles = vehicle_rows_for_company(company_id, include_inactive=True)
-    return render(request, "admin_safety.html", {"logs": logs, "members": members, "vehicles": vehicles})
+    audit_rows = query_all(
+        """SELECT a.*, u.name AS actor_name FROM audit_logs a
+           LEFT JOIN users u ON u.id=a.actor_id
+           WHERE a.company_id=? AND a.action IN (
+             'work_log.update', 'delivery.update', 'shift.update', 'vehicle.update',
+             'inspection_sheet.apply_counts', 'inspection_slip.upsert'
+           )
+           ORDER BY a.created_at DESC LIMIT 50""",
+        (company_id,),
+    )
+    return render(request, "admin_safety.html", {"logs": logs, "members": members, "vehicles": vehicles, "audit_rows": audit_rows})
 
 
 @app.get("/admin/safety/daily-report.pdf")

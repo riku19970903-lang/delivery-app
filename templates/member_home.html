@@ -25,6 +25,15 @@
     </div>
   </section>
 
+  {% if company_notice %}
+  <div class="flow-alert-stack">
+    <div class="flow-alert company">
+      <b>会社からのお知らせ</b><br>
+      {{ company_notice }}
+    </div>
+  </div>
+  {% endif %}
+
   <div class="flow-alert-stack">
     {% if vehicle_alert.inspection_level %}
     <div class="flow-alert {{ vehicle_alert.inspection_level }}">{{ vehicle_alert.inspection_message }}</div>
