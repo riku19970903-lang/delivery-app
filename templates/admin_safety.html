@@ -11,6 +11,23 @@
   </label>
   <button class="primary">運転日報PDF出力</button>
 </form>
+<form class="toolbar" action="/admin/safety/daily-report.pdf" target="_blank">
+  <label>開始日<input type="date" name="start_date" value="{{ today }}"></label>
+  <label>終了日<input type="date" name="end_date" value="{{ today }}"></label>
+  <label>メンバー
+    <select name="member_id">
+      <option value="0">全員</option>
+      {% for m in members %}<option value="{{ m.id }}">{{ m.name }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>車両
+    <select name="vehicle_id">
+      <option value="0">全車両</option>
+      {% for v in vehicles %}<option value="{{ v.id }}">{{ v.name }}{% if v.plate_number %} / {{ v.plate_number }}{% endif %}</option>{% endfor %}
+    </select>
+  </label>
+  <button class="primary">国交省様式 日報PDF</button>
+</form>
 <section class="panel tablewrap"><table><tr><th>日時</th><th>名前</th><th>区分</th><th>結果</th><th>検知器</th><th>酒気</th><th>体調</th><th>顔色</th><th>呼気</th><th>声</th><th>管理者</th><th>備考</th></tr>
 {% for l in logs %}<tr><td>{{ l.logged_at }}</td><td>{{ l.name }}</td><td>{{ "出勤" if l.log_type == "start" else "退勤" }}</td><td>{{ l.alcohol_result }}</td><td>{{ l.detector_used }}</td><td>{{ l.intoxicated }}</td><td>{{ l.health_status }}</td><td>{{ l.face_check }}</td><td>{{ l.breath_check }}</td><td>{{ l.voice_check }}</td><td>{{ l.admin_confirm }}</td><td>{{ l.notes }}</td></tr>{% endfor %}
 </table></section>

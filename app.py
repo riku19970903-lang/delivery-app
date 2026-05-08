@@ -2,12 +2,14 @@ import calendar
 import csv
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
+from email.message import EmailMessage
 from hashlib import pbkdf2_hmac, sha256
 import hmac
 import io
 import json
 import logging
 import secrets
+import smtplib
 import os
 from pathlib import Path
 import re
@@ -16,7 +18,7 @@ from threading import Lock, Thread
 from time import monotonic
 from typing import List, Optional
 import unicodedata
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 from urllib.error import HTTPError, URLError
 from urllib.request import Request as UrlRequest, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -47,6 +49,15 @@ SUPABASE_STORAGE_KEY = (
 )
 SUPABASE_STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "inspection-sheets")
 SUPABASE_STORAGE_PUBLIC_BASE = os.getenv("SUPABASE_STORAGE_PUBLIC_URL_BASE", "").rstrip("/")
+STORAGE_RETENTION_DAYS = int(os.getenv("STORAGE_RETENTION_DAYS", "62"))
+APP_BASE_URL = os.getenv("APP_BASE_URL", "").rstrip("/")
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USERNAME or "no-reply@sparkle-drive.local").strip()
+SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "1").lower() in {"1", "true", "yes", "on"}
+PASSWORD_RESET_EXPIRY_MINUTES = int(os.getenv("PASSWORD_RESET_EXPIRY_MINUTES", "60"))
 try:
     APP_TZ = ZoneInfo(os.getenv("APP_TIMEZONE", "Asia/Tokyo"))
 except ZoneInfoNotFoundError:
@@ -370,6 +381,34 @@ def upload_to_supabase_storage(folder: str, filename: str, data: bytes, content_
     return f"{SUPABASE_URL}/storage/v1/object/public/{quote(SUPABASE_STORAGE_BUCKET, safe='')}/{encoded_path}"
 
 
+def retention_until(uploaded_at: Optional[datetime] = None):
+    uploaded = uploaded_at or app_now()
+    return (uploaded + timedelta(days=STORAGE_RETENTION_DAYS)).date().isoformat()
+
+
+def storage_path_from_url(path: str):
+    if not path or not is_remote_image_path(path):
+        return ""
+    marker = f"/storage/v1/object/public/{quote(SUPABASE_STORAGE_BUCKET, safe='')}/"
+    if marker not in path:
+        return ""
+    encoded_path = path.split(marker, 1)[1].split("?", 1)[0]
+    return "/".join(unquote(part) for part in encoded_path.split("/"))
+
+
+def inspection_storage_meta(folder: str, filename: str, public_path: str, uploaded_at: Optional[datetime] = None):
+    uploaded = uploaded_at or app_now()
+    uploaded_s = uploaded.isoformat(timespec="seconds")
+    remote = is_remote_image_path(public_path)
+    return {
+        "storage_path": _storage_path(folder, filename) if remote else storage_path_from_url(public_path),
+        "public_url": public_path if remote else "",
+        "signed_url": "",
+        "uploaded_at": uploaded_s,
+        "retention_until": retention_until(uploaded),
+    }
+
+
 def save_inspection_image(data: bytes, filename: str, content_type: str, folder: str, local_dir: Path):
     remote_url = upload_to_supabase_storage(folder, filename, data, content_type)
     if remote_url:
@@ -403,9 +442,9 @@ def inspection_image_info(path: str):
     path = path or ""
     if not path:
         return {"image_path": "", "image_available": False, "image_missing": False, "image_view_url": "", "image_label": "画像なし"}
-    if is_remote_image_path(path):
-        return {"image_path": path, "image_available": True, "image_missing": False, "image_view_url": path, "image_label": "画像あり"}
     view_url = f"/inspection-file?path={quote(path, safe='')}"
+    if is_remote_image_path(path):
+        return {"image_path": path, "image_available": True, "image_missing": False, "image_view_url": view_url, "image_label": "画像あり"}
     if local_image_exists(path):
         return {"image_path": path, "image_available": True, "image_missing": False, "image_view_url": view_url, "image_label": "画像あり"}
     return {
@@ -804,6 +843,7 @@ def _init_db_schema():
                 username TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL CHECK(role IN ('admin','member')),
+                email TEXT DEFAULT '',
                 phone TEXT DEFAULT '',
                 vehicle TEXT DEFAULT '',
                 active INTEGER NOT NULL DEFAULT 1,
@@ -863,6 +903,12 @@ def _init_db_schema():
                 vehicle_id INTEGER,
                 vehicle_name TEXT DEFAULT '',
                 odometer INTEGER NOT NULL DEFAULT 0,
+                start_odometer INTEGER NOT NULL DEFAULT 0,
+                end_odometer INTEGER NOT NULL DEFAULT 0,
+                distance_km INTEGER NOT NULL DEFAULT 0,
+                rest_minutes INTEGER NOT NULL DEFAULT 0,
+                waiting_minutes INTEGER NOT NULL DEFAULT 0,
+                loading_minutes INTEGER NOT NULL DEFAULT 0,
                 alcohol_result TEXT NOT NULL,
                 detector_used TEXT NOT NULL,
                 intoxicated TEXT NOT NULL,
@@ -958,9 +1004,10 @@ def _init_db_schema():
             CREATE TABLE IF NOT EXISTS depots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 company_id INTEGER NOT NULL DEFAULT 1,
-                name TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                UNIQUE(company_id, name)
             );
             CREATE TABLE IF NOT EXISTS districts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -969,7 +1016,7 @@ def _init_db_schema():
                 name TEXT NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
-                UNIQUE(depot_id, name),
+                UNIQUE(company_id, depot_id, name),
                 FOREIGN KEY(depot_id) REFERENCES depots(id)
             );
             CREATE TABLE IF NOT EXISTS towns (
@@ -979,7 +1026,7 @@ def _init_db_schema():
                 name TEXT NOT NULL,
                 active INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
-                UNIQUE(district_id, name),
+                UNIQUE(company_id, district_id, name),
                 FOREIGN KEY(district_id) REFERENCES districts(id)
             );
             CREATE TABLE IF NOT EXISTS shift_towns (
@@ -1009,6 +1056,9 @@ def _init_db_schema():
                 sheet_date TEXT NOT NULL,
                 delivery_date TEXT DEFAULT '',
                 file_path TEXT NOT NULL,
+                storage_path TEXT DEFAULT '',
+                public_url TEXT DEFAULT '',
+                signed_url TEXT DEFAULT '',
                 original_filename TEXT DEFAULT '',
                 content_type TEXT DEFAULT '',
                 ocr_status TEXT NOT NULL DEFAULT '未処理',
@@ -1017,6 +1067,8 @@ def _init_db_schema():
                 ocr_pickup INTEGER NOT NULL DEFAULT 0,
                 ocr_acceptance INTEGER NOT NULL DEFAULT 0,
                 ocr_received INTEGER NOT NULL DEFAULT 0,
+                uploaded_at TEXT DEFAULT '',
+                retention_until TEXT DEFAULT '',
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id),
                 UNIQUE(user_id, sheet_date)
@@ -1028,12 +1080,28 @@ def _init_db_schema():
                 delivery_id INTEGER NOT NULL,
                 slip_date TEXT NOT NULL,
                 file_path TEXT NOT NULL,
+                storage_path TEXT DEFAULT '',
+                public_url TEXT DEFAULT '',
+                signed_url TEXT DEFAULT '',
                 original_filename TEXT DEFAULT '',
                 content_type TEXT DEFAULT '',
                 uploaded_at TEXT NOT NULL,
+                retention_until TEXT DEFAULT '',
                 FOREIGN KEY(user_id) REFERENCES users(id),
                 FOREIGN KEY(delivery_id) REFERENCES deliveries(id),
                 UNIQUE(user_id, slip_date)
+            );
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL DEFAULT 1,
+                user_id INTEGER NOT NULL,
+                email TEXT NOT NULL,
+                token_hash TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT DEFAULT '',
+                dev_reset_url TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
             );
             CREATE TABLE IF NOT EXISTS company_features (
                 company_id INTEGER NOT NULL,
@@ -1104,6 +1172,7 @@ def _init_db_schema():
         ensure_column(conn, "companies", "next_renewal_date", "TEXT DEFAULT ''")
         ensure_column(conn, "companies", "memo", "TEXT DEFAULT ''")
         ensure_column(conn, "users", "phone", "TEXT DEFAULT ''")
+        ensure_column(conn, "users", "email", "TEXT DEFAULT ''")
         ensure_column(conn, "users", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "users", "vehicle", "TEXT DEFAULT ''")
         ensure_column(conn, "users", "last_vehicle_id", "INTEGER")
@@ -1131,6 +1200,12 @@ def _init_db_schema():
         ensure_column(conn, "work_logs", "vehicle_id", "INTEGER")
         ensure_column(conn, "work_logs", "vehicle_name", "TEXT DEFAULT ''")
         ensure_column(conn, "work_logs", "odometer", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_logs", "start_odometer", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_logs", "end_odometer", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_logs", "distance_km", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_logs", "rest_minutes", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_logs", "waiting_minutes", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_logs", "loading_minutes", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "work_logs", "detector_used", "TEXT DEFAULT ''")
         ensure_column(conn, "work_logs", "intoxicated", "TEXT DEFAULT ''")
         ensure_column(conn, "work_logs", "health_status", "TEXT DEFAULT ''")
@@ -1184,6 +1259,9 @@ def _init_db_schema():
         ensure_column(conn, "inspection_sheets", "file_path", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_sheets", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "inspection_sheets", "delivery_date", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_sheets", "storage_path", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_sheets", "public_url", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_sheets", "signed_url", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_sheets", "original_filename", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_sheets", "content_type", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_sheets", "ocr_status", "TEXT DEFAULT '未処理'")
@@ -1192,12 +1270,25 @@ def _init_db_schema():
         ensure_column(conn, "inspection_sheets", "ocr_pickup", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "inspection_sheets", "ocr_acceptance", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "inspection_sheets", "ocr_received", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "inspection_sheets", "uploaded_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_sheets", "retention_until", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_sheets", "created_at", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_slips", "file_path", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_slips", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "inspection_slips", "storage_path", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_slips", "public_url", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_slips", "signed_url", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_slips", "original_filename", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_slips", "content_type", "TEXT DEFAULT ''")
         ensure_column(conn, "inspection_slips", "uploaded_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "inspection_slips", "retention_until", "TEXT DEFAULT ''")
+        ensure_column(conn, "password_reset_tokens", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "password_reset_tokens", "email", "TEXT DEFAULT ''")
+        ensure_column(conn, "password_reset_tokens", "token_hash", "TEXT DEFAULT ''")
+        ensure_column(conn, "password_reset_tokens", "expires_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "password_reset_tokens", "used_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "password_reset_tokens", "dev_reset_url", "TEXT DEFAULT ''")
+        ensure_column(conn, "password_reset_tokens", "created_at", "TEXT DEFAULT ''")
         ensure_column(conn, "vehicle_issues", "status", "TEXT NOT NULL DEFAULT '未対応'")
         ensure_column(conn, "vehicle_issues", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "holiday_requests", "company_id", "INTEGER NOT NULL DEFAULT 1")
@@ -1217,11 +1308,6 @@ def _init_db_schema():
         seed_feature_prices(conn)
         for company in conn.execute("SELECT id FROM companies").fetchall():
             seed_company_features(conn, company["id"], 1)
-            default_depot_name = "未設定拠点" if int(company["id"]) == PLATFORM_COMPANY_ID else f"未設定拠点 {company['id']}"
-            conn.execute(
-                "INSERT OR IGNORE INTO depots(company_id, name, created_at) VALUES (?, ?, ?)",
-                (company["id"], default_depot_name, datetime.now().isoformat(timespec="seconds")),
-            )
             conn.execute(
                 "INSERT OR IGNORE INTO company_vehicle_rates(company_id, daily_fee, monthly_fee, updated_at) VALUES (?, 1500, 30000, ?)",
                 (company["id"], datetime.now().isoformat(timespec="seconds")),
@@ -1379,6 +1465,30 @@ def require_platform_admin(user=Depends(require_admin)):
 @app.get("/inspection-file", response_class=HTMLResponse)
 def inspection_file(request: Request, path: str = "", user=Depends(require_user)):
     if is_remote_image_path(path):
+        try:
+            head = UrlRequest(path, method="HEAD")
+            with urlopen(head, timeout=DB_CONNECT_TIMEOUT) as response:
+                if response.status >= 400:
+                    raise HTTPError(path, response.status, "remote image missing", response.headers, None)
+        except HTTPError as exc:
+            if exc.code in {403, 404, 410}:
+                return render(
+                    request,
+                    "image_missing.html",
+                    {
+                        "path": path,
+                        "message": "画像が見つかりません。再アップロードしてください。",
+                    },
+                )
+        except (URLError, TimeoutError, OSError):
+            return render(
+                request,
+                "image_missing.html",
+                {
+                    "path": path,
+                    "message": "画像の確認に失敗しました。時間を置いて再度確認するか、再アップロードしてください。",
+                },
+            )
         return RedirectResponse(path, status_code=303)
     if local_image_exists(path):
         return RedirectResponse(path, status_code=303)
@@ -2107,6 +2217,21 @@ def update_vehicle_odometer(conn, company_id: int, vehicle_id: Optional[int], ve
         )
 
 
+def odometer_log_values(conn, company_id: int, user_id: int, work_date: str, log_type: str, odometer: int):
+    current = max(odometer, 0)
+    if log_type == "start":
+        return current, 0, 0
+    start_log = conn.execute(
+        """SELECT start_odometer, odometer FROM work_logs
+           WHERE company_id=? AND user_id=? AND work_date=? AND log_type='start'
+           ORDER BY logged_at DESC LIMIT 1""",
+        (company_id, user_id, work_date),
+    ).fetchone()
+    start_odo = int_value(row_value(start_log, "start_odometer") or row_value(start_log, "odometer"))
+    distance = max(current - start_odo, 0) if current and start_odo else 0
+    return start_odo, current, distance
+
+
 def parse_iso_date(value: str):
     if not value:
         return None
@@ -2322,15 +2447,28 @@ def upsert_delivery_counts(company_id: int, user_id: int, work_date: str, comple
 def save_inspection_slip_record(company_id: int, user_id: int, delivery_id: int, work_date: str, image_path: str, original_filename: str = "", content_type: str = ""):
     if not image_path:
         return
-    now = app_now().isoformat(timespec="seconds")
+    now_dt = app_now()
+    now = now_dt.isoformat(timespec="seconds")
+    remote_filename = unquote(image_path.split("?", 1)[0].rstrip("/").split("/")[-1]) if is_remote_image_path(image_path) else ""
+    filename = remote_filename or Path(original_filename or image_path).name
+    if is_remote_image_path(image_path):
+        storage_path = storage_path_from_url(image_path) or _storage_path("inspection_slips", filename)
+    elif allowed_local_image_path(image_path):
+        storage_path = ""
+    else:
+        storage_path = ""
+    public_url = image_path if is_remote_image_path(image_path) else ""
+    retention = retention_until(now_dt)
     with db() as conn:
         conn.execute(
-            """INSERT INTO inspection_slips(company_id, user_id, delivery_id, slip_date, file_path, original_filename, content_type, uploaded_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO inspection_slips(company_id, user_id, delivery_id, slip_date, file_path, storage_path, public_url, signed_url,
+               original_filename, content_type, uploaded_at, retention_until)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(user_id, slip_date) DO UPDATE SET delivery_id=excluded.delivery_id,
-               company_id=excluded.company_id, file_path=excluded.file_path, original_filename=excluded.original_filename,
-               content_type=excluded.content_type, uploaded_at=excluded.uploaded_at""",
-            (company_id, user_id, delivery_id, work_date, image_path, original_filename, content_type, now),
+               company_id=excluded.company_id, file_path=excluded.file_path, storage_path=excluded.storage_path,
+               public_url=excluded.public_url, signed_url=excluded.signed_url, original_filename=excluded.original_filename,
+               content_type=excluded.content_type, uploaded_at=excluded.uploaded_at, retention_until=excluded.retention_until""",
+            (company_id, user_id, delivery_id, work_date, image_path, storage_path, public_url, "", original_filename, content_type, now, retention),
         )
         conn.execute("UPDATE deliveries SET inspection_sheet_path=?, updated_at=? WHERE id=? AND company_id=?", (image_path, now, delivery_id, company_id))
         audit_log(
@@ -2479,6 +2617,164 @@ def index(request: Request):
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request):
     return render(request, "login.html", {"error": ""})
+
+
+def smtp_configured():
+    return bool(SMTP_HOST and SMTP_FROM)
+
+
+def external_url(request: Request, path: str):
+    if APP_BASE_URL:
+        return f"{APP_BASE_URL}{path}"
+    return f"{str(request.base_url).rstrip('/')}{path}"
+
+
+def send_password_reset_email(to_email: str, reset_url: str):
+    if not smtp_configured():
+        return False
+    message = EmailMessage()
+    message["Subject"] = "SPARKLE DRIVE パスワード再設定"
+    message["From"] = SMTP_FROM
+    message["To"] = to_email
+    message.set_content(
+        "SPARKLE DRIVE のパスワード再設定リンクです。\n"
+        f"{PASSWORD_RESET_EXPIRY_MINUTES}分以内に以下のURLから新しいパスワードを登録してください。\n\n"
+        f"{reset_url}\n\n"
+        "このメールに覚えがない場合は破棄してください。"
+    )
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+            if SMTP_USE_TLS:
+                server.starttls()
+            if SMTP_USERNAME:
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(message)
+        return True
+    except Exception:
+        logger.exception("Password reset email failed")
+        return False
+
+
+def create_password_reset(conn, request: Request, user_row):
+    token = secrets.token_urlsafe(32)
+    token_hash = sha256(token.encode("utf-8")).hexdigest()
+    now_dt = app_now()
+    expires_at = (now_dt + timedelta(minutes=PASSWORD_RESET_EXPIRY_MINUTES)).isoformat(timespec="seconds")
+    reset_url = external_url(request, f"/password-reset/{token}")
+    dev_reset_url = "" if smtp_configured() else reset_url
+    conn.execute(
+        """INSERT INTO password_reset_tokens(company_id, user_id, email, token_hash, expires_at, used_at, dev_reset_url, created_at)
+           VALUES (?, ?, ?, ?, ?, '', ?, ?)""",
+        (
+            row_value(user_row, "company_id", 1),
+            user_row["id"],
+            row_value(user_row, "email", ""),
+            token_hash,
+            expires_at,
+            dev_reset_url,
+            now_dt.isoformat(timespec="seconds"),
+        ),
+    )
+    return reset_url
+
+
+def password_reset_user_for_token(token: str):
+    token_hash = sha256((token or "").encode("utf-8")).hexdigest()
+    now_s = app_now().isoformat(timespec="seconds")
+    return query_one(
+        """SELECT t.*, u.username, u.name, u.password_hash, u.active, u.purged
+           FROM password_reset_tokens t
+           JOIN users u ON u.id=t.user_id AND u.company_id=t.company_id
+           WHERE t.token_hash=? AND COALESCE(t.used_at, '')='' AND t.expires_at>=?
+             AND u.active=1 AND COALESCE(u.purged,0)=0
+           ORDER BY t.id DESC LIMIT 1""",
+        (token_hash, now_s),
+    )
+
+
+@app.get("/password-reset/request", response_class=HTMLResponse)
+def password_reset_request_page(request: Request, message: str = "", error: str = ""):
+    return render(request, "password_reset_request.html", {"message": message, "error": error})
+
+
+@app.post("/password-reset/request", response_class=HTMLResponse)
+def password_reset_request(request: Request, email: str = Form(...)):
+    email = email.strip().lower()
+    message = "登録メールアドレスが見つかった場合、再設定リンクを発行しました。"
+    if not email:
+        return render(request, "password_reset_request.html", {"message": "", "error": "メールアドレスを入力してください"})
+    user_rows = query_all(
+        """SELECT * FROM users
+           WHERE LOWER(COALESCE(email, ''))=? AND active=1 AND COALESCE(purged,0)=0
+           ORDER BY id LIMIT 10""",
+        (email,),
+    )
+    for user_row in user_rows:
+        with db() as conn:
+            reset_url = create_password_reset(conn, request, user_row)
+            audit_log(
+                company_id_for(user_row),
+                {"id": user_row["id"], "role": row_value(user_row, "role", "")},
+                "password_reset.request",
+                "users",
+                user_row["id"],
+                "Password reset requested",
+                conn=conn,
+            )
+            conn.commit()
+        if not send_password_reset_email(email, reset_url):
+            logger.warning("Password reset URL for %s: %s", email, reset_url)
+    return render(request, "password_reset_request.html", {"message": message, "error": ""})
+
+
+@app.get("/password-reset/{token}", response_class=HTMLResponse)
+def password_reset_form(request: Request, token: str):
+    token_row = password_reset_user_for_token(token)
+    if not token_row:
+        return render(request, "password_reset_form.html", {"token": "", "error": "再設定リンクが無効、または期限切れです。", "message": ""})
+    return render(request, "password_reset_form.html", {"token": token, "error": "", "message": ""})
+
+
+@app.post("/password-reset/{token}", response_class=HTMLResponse)
+def password_reset_save(request: Request, token: str, new_password: str = Form(...), confirm_password: str = Form(...)):
+    token_row = password_reset_user_for_token(token)
+    if not token_row:
+        return render(request, "password_reset_form.html", {"token": "", "error": "再設定リンクが無効、または期限切れです。", "message": ""})
+    if not new_password:
+        return render(request, "password_reset_form.html", {"token": token, "error": "新しいパスワードを入力してください。", "message": ""})
+    if new_password != confirm_password:
+        return render(request, "password_reset_form.html", {"token": token, "error": "新しいパスワードが一致しません。", "message": ""})
+    now_s = app_now().isoformat(timespec="seconds")
+    with db() as conn:
+        before = conn.execute("SELECT id, username, role, company_id FROM users WHERE id=? AND company_id=?", (token_row["user_id"], token_row["company_id"])).fetchone()
+        conn.execute("UPDATE users SET password_hash=? WHERE id=? AND company_id=?", (hash_password(new_password), token_row["user_id"], token_row["company_id"]))
+        conn.execute("UPDATE password_reset_tokens SET used_at=? WHERE id=?", (now_s, token_row["id"]))
+        audit_log(
+            token_row["company_id"],
+            {"id": token_row["user_id"], "role": row_value(before, "role", "")},
+            "password_reset.complete",
+            "users",
+            token_row["user_id"],
+            "Password reset completed",
+            before=row_to_dict(before),
+            conn=conn,
+        )
+        conn.commit()
+    return render(request, "password_reset_form.html", {"token": "", "error": "", "message": "パスワードを変更しました。ログインしてください。"})
+
+
+@app.get("/admin/password-resets", response_class=HTMLResponse)
+def admin_password_resets(request: Request, user=Depends(require_admin)):
+    company_id = company_id_for(user)
+    rows = query_all(
+        """SELECT t.*, u.name, u.username
+           FROM password_reset_tokens t
+           JOIN users u ON u.id=t.user_id AND u.company_id=t.company_id
+           WHERE t.company_id=? AND COALESCE(t.used_at, '')='' AND t.expires_at>=?
+           ORDER BY t.created_at DESC LIMIT 50""",
+        (company_id, app_now().isoformat(timespec="seconds")),
+    )
+    return render(request, "admin_password_resets.html", {"rows": rows, "smtp_configured": smtp_configured()})
 
 
 @app.post("/login")
@@ -2713,6 +3009,7 @@ def save_member(
     name: str = Form(...),
     username: str = Form(...),
     password: str = Form(""),
+    email: str = Form(""),
     phone: str = Form(""),
     vehicle: str = Form(""),
     user=Depends(require_admin),
@@ -2721,6 +3018,7 @@ def save_member(
     company_id = company_id_for(user)
     now = app_now().isoformat(timespec="seconds")
     username = username.strip()
+    email = email.strip()
     if not username:
         return RedirectResponse(f"/admin/members?error={quote('ログインIDを入力してください')}", status_code=303)
     release_purged_username(username)
@@ -2730,11 +3028,11 @@ def save_member(
             return RedirectResponse(f"/admin/members?error={quote('同じログインIDが既に使われています')}", status_code=303)
         if password:
             execute(
-                "UPDATE users SET name=?, username=?, password_hash=?, phone=?, vehicle=? WHERE id=? AND role='member' AND company_id=? AND COALESCE(purged,0)=0",
-                (name, username, hash_password(password), phone, vehicle, member_id, company_id),
+                "UPDATE users SET name=?, username=?, password_hash=?, email=?, phone=?, vehicle=? WHERE id=? AND role='member' AND company_id=? AND COALESCE(purged,0)=0",
+                (name, username, hash_password(password), email, phone, vehicle, member_id, company_id),
             )
         else:
-            execute("UPDATE users SET name=?, username=?, phone=?, vehicle=? WHERE id=? AND role='member' AND company_id=? AND COALESCE(purged,0)=0", (name, username, phone, vehicle, member_id, company_id))
+            execute("UPDATE users SET name=?, username=?, email=?, phone=?, vehicle=? WHERE id=? AND role='member' AND company_id=? AND COALESCE(purged,0)=0", (name, username, email, phone, vehicle, member_id, company_id))
         ensure_vehicle_for_user(company_id, int(member_id), vehicle)
         return RedirectResponse("/admin/members?message=" + quote("メンバー情報を更新しました"), status_code=303)
     existing = query_one("SELECT * FROM users WHERE username=? AND COALESCE(purged,0)=0", (username,))
@@ -2746,8 +3044,8 @@ def save_member(
         return RedirectResponse(f"/admin/members?error={quote('同じログインIDが既に使われています')}", status_code=303)
     try:
         cur = execute(
-            "INSERT INTO users(company_id, name, username, password_hash, role, phone, vehicle, created_at) VALUES (?,?,?,?,?,?,?,?)",
-            (company_id, name, username, hash_password(password or DEFAULT_MEMBER_PASSWORD), "member", phone, vehicle, now),
+            "INSERT INTO users(company_id, name, username, password_hash, role, email, phone, vehicle, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (company_id, name, username, hash_password(password or DEFAULT_MEMBER_PASSWORD), "member", email, phone, vehicle, now),
         )
         execute("INSERT OR IGNORE INTO rates(user_id, company_id) VALUES (?, ?)", (cur.lastrowid, company_id))
         ensure_vehicle_for_user(company_id, cur.lastrowid, vehicle)
@@ -2795,7 +3093,7 @@ def admin_settings_page(
     company_id = company_id_for(user)
     can_manage = can_manage_companies(user)
     members = query_all(
-        """SELECT id, name, username, active
+        """SELECT id, name, username, email, active
            FROM users
            WHERE role='member' AND company_id=? AND COALESCE(purged,0)=0
            ORDER BY active DESC, name
@@ -2808,7 +3106,10 @@ def admin_settings_page(
             """SELECT c.*,
                       (SELECT username FROM users au
                        WHERE au.company_id=c.id AND au.role='admin' AND au.active=1
-                       ORDER BY au.id LIMIT 1) AS admin_username
+                       ORDER BY au.id LIMIT 1) AS admin_username,
+                      (SELECT email FROM users au
+                       WHERE au.company_id=c.id AND au.role='admin' AND au.active=1
+                       ORDER BY au.id LIMIT 1) AS admin_email
                FROM companies c
                ORDER BY c.id
                LIMIT 200"""
@@ -2845,9 +3146,11 @@ def admin_settings_page(
 def update_admin_account(
     username: str = Form(...),
     password: str = Form(""),
+    email: str = Form(""),
     user=Depends(require_admin),
 ):
     username = username.strip()
+    email = email.strip()
     if not username:
         return RedirectResponse("/admin/settings?error=" + quote("ログインIDを入力してください"), status_code=303)
     release_purged_username(username)
@@ -2855,9 +3158,9 @@ def update_admin_account(
     if duplicate:
         return RedirectResponse("/admin/settings?error=" + quote("同じログインIDが既に使われています"), status_code=303)
     if password:
-        execute("UPDATE users SET username=?, password_hash=? WHERE id=? AND role='admin'", (username, hash_password(password), user["id"]))
+        execute("UPDATE users SET username=?, password_hash=?, email=? WHERE id=? AND role='admin'", (username, hash_password(password), email, user["id"]))
     else:
-        execute("UPDATE users SET username=? WHERE id=? AND role='admin'", (username, user["id"]))
+        execute("UPDATE users SET username=?, email=? WHERE id=? AND role='admin'", (username, email, user["id"]))
     return RedirectResponse("/admin/settings?message=" + quote("管理者アカウントを更新しました"), status_code=303)
 
 
@@ -2866,11 +3169,13 @@ def update_member_login(
     member_id: int = Form(...),
     username: str = Form(...),
     password: str = Form(""),
+    email: str = Form(""),
     user=Depends(require_admin),
 ):
     require_feature(user, "members")
     company_id = company_id_for(user)
     username = username.strip()
+    email = email.strip()
     if not username:
         return RedirectResponse("/admin/settings?error=" + quote("メンバーのログインIDを入力してください"), status_code=303)
     release_purged_username(username)
@@ -2884,9 +3189,9 @@ def update_member_login(
     if duplicate:
         return RedirectResponse("/admin/settings?error=" + quote("同じログインIDが既に使われています"), status_code=303)
     if password:
-        execute("UPDATE users SET username=?, password_hash=? WHERE id=? AND role='member' AND company_id=?", (username, hash_password(password), member_id, company_id))
+        execute("UPDATE users SET username=?, password_hash=?, email=? WHERE id=? AND role='member' AND company_id=?", (username, hash_password(password), email, member_id, company_id))
     else:
-        execute("UPDATE users SET username=? WHERE id=? AND role='member' AND company_id=?", (username, member_id, company_id))
+        execute("UPDATE users SET username=?, email=? WHERE id=? AND role='member' AND company_id=?", (username, email, member_id, company_id))
     return RedirectResponse("/admin/settings?message=" + quote("メンバーのログイン情報を更新しました"), status_code=303)
 
 
@@ -2896,6 +3201,7 @@ def save_company(
     name: str = Form(...),
     code: str = Form(...),
     admin_username: str = Form(...),
+    admin_email: str = Form(""),
     admin_password: str = Form(""),
     status: str = Form("利用中"),
     contract_start_date: str = Form(""),
@@ -2910,6 +3216,7 @@ def save_company(
     name = name.strip()
     code = code.strip()
     admin_username = admin_username.strip()
+    admin_email = admin_email.strip()
     release_purged_username(admin_username)
     if status not in COMPANY_STATUSES:
         status = "利用中"
@@ -2958,17 +3265,18 @@ def save_company(
                     "UPDATE users SET name=?, username=?, password_hash=?, active=1 WHERE id=? AND role='admin' AND company_id=?",
                     (admin_name, admin_username, hash_password(admin_password), admin["id"], cid),
                 )
+                execute("UPDATE users SET email=? WHERE id=? AND role='admin' AND company_id=?", (admin_email, admin["id"], cid))
             else:
                 execute(
-                    "UPDATE users SET name=?, username=?, active=1 WHERE id=? AND role='admin' AND company_id=?",
-                    (admin_name, admin_username, admin["id"], cid),
+                    "UPDATE users SET name=?, username=?, email=?, active=1 WHERE id=? AND role='admin' AND company_id=?",
+                    (admin_name, admin_username, admin_email, admin["id"], cid),
                 )
         else:
             if not admin_password:
                 return RedirectResponse("/admin/settings?error=" + quote("管理者が未登録です。パスワードを入力してください"), status_code=303)
             execute(
-                "INSERT INTO users(company_id, name, username, password_hash, role, phone, vehicle, active, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                (cid, admin_name, admin_username, hash_password(admin_password), "admin", "", "", 1, now),
+                "INSERT INTO users(company_id, name, username, password_hash, role, email, phone, vehicle, active, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (cid, admin_name, admin_username, hash_password(admin_password), "admin", admin_email, "", "", 1, now),
             )
         return RedirectResponse("/admin/settings?message=" + quote("会社情報を更新しました"), status_code=303)
 
@@ -2978,18 +3286,14 @@ def save_company(
     )
     new_company_id = cur.lastrowid
     execute(
-        "INSERT INTO users(company_id, name, username, password_hash, role, phone, vehicle, active, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        (new_company_id, admin_name, admin_username, hash_password(admin_password), "admin", "", "", 1, now),
+        "INSERT INTO users(company_id, name, username, password_hash, role, email, phone, vehicle, active, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (new_company_id, admin_name, admin_username, hash_password(admin_password), "admin", admin_email, "", "", 1, now),
     )
     with db() as conn:
         seed_company_features(conn, new_company_id, 1)
         conn.execute(
             "INSERT OR IGNORE INTO company_vehicle_rates(company_id, daily_fee, monthly_fee, updated_at) VALUES (?, 1500, 30000, ?)",
             (new_company_id, now),
-        )
-        conn.execute(
-            "INSERT OR IGNORE INTO depots(company_id, name, created_at) VALUES (?, ?, ?)",
-            (new_company_id, f"未設定拠点 {new_company_id}", now),
         )
         audit_log(
             company_id_for(user),
@@ -3506,6 +3810,7 @@ def member_home(request: Request, user=Depends(require_user)):
             "next_shifts": next_shifts,
             "work_state": work_state,
             "last_odometer": last_odometer,
+            "today": today_s,
             "today_label": f"{now_dt.year}年 {now_dt.month}月{now_dt.day}日",
             "current_time": now_dt.strftime("%H:%M"),
             "flow_message": home_flow_message(selected_vehicle_alert, holiday_alert),
@@ -3568,11 +3873,13 @@ def save_work_log(
     vehicle_name = vehicle_label(vehicle) if vehicle else ""
     now = app_now().isoformat(timespec="seconds")
     with db() as conn:
+        start_odo, end_odo, distance_km = odometer_log_values(conn, company_id, user["id"], work_date, log_type, odometer)
         cur = conn.execute(
-            """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, vehicle_id, vehicle_name, alcohol_result, detector_used,
-               intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at, odometer)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (company_id, user["id"], work_date, log_type, logged_at, vehicle["id"] if vehicle else None, vehicle_name, alcohol_result, detector_used, intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, now, max(odometer, 0)),
+            """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, vehicle_id, vehicle_name, odometer,
+               start_odometer, end_odometer, distance_km, alcohol_result, detector_used, intoxicated, health_status,
+               face_check, breath_check, voice_check, admin_confirm, notes, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (company_id, user["id"], work_date, log_type, logged_at, vehicle["id"] if vehicle else None, vehicle_name, max(odometer, 0), start_odo, end_odo, distance_km, alcohol_result, detector_used, intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, now),
         )
         if vehicle:
             conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=? AND company_id=?", (vehicle["id"], vehicle["name"], user["id"], company_id))
@@ -3584,7 +3891,16 @@ def save_work_log(
             "work_logs",
             cur.lastrowid,
             "Work log saved",
-            after={"work_date": work_date, "log_type": log_type, "logged_at": logged_at, "vehicle_id": vehicle["id"] if vehicle else None, "odometer": max(odometer, 0)},
+            after={
+                "work_date": work_date,
+                "log_type": log_type,
+                "logged_at": logged_at,
+                "vehicle_id": vehicle["id"] if vehicle else None,
+                "odometer": max(odometer, 0),
+                "start_odometer": start_odo,
+                "end_odometer": end_odo,
+                "distance_km": distance_km,
+            },
             conn=conn,
         )
         conn.commit()
@@ -3643,10 +3959,12 @@ def mobile_work_start(
     notes = " / ".join(part for part in [vehicle_note, notes.strip()] if part)
     now = app_now().isoformat(timespec="seconds")
     with db() as conn:
+        start_odo, end_odo, distance_km = odometer_log_values(conn, company_id, user["id"], work_date, "start", odometer)
         cur = conn.execute(
-            """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, vehicle_id, vehicle_name, odometer, alcohol_result, detector_used,
+            """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, vehicle_id, vehicle_name, odometer,
+               start_odometer, end_odometer, distance_km, alcohol_result, detector_used,
                intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 company_id,
                 user["id"],
@@ -3656,6 +3974,9 @@ def mobile_work_start(
                 vehicle["id"] if vehicle else None,
                 vehicle_name,
                 max(odometer, 0),
+                start_odo,
+                end_odo,
+                distance_km,
                 alcohol_result or "OK",
                 detector_used,
                 "無",
@@ -3678,7 +3999,15 @@ def mobile_work_start(
             "work_logs",
             cur.lastrowid,
             "Mobile start work log saved",
-            after={"work_date": work_date, "logged_at": logged_at, "vehicle_id": vehicle["id"] if vehicle else None, "odometer": max(odometer, 0)},
+            after={
+                "work_date": work_date,
+                "logged_at": logged_at,
+                "vehicle_id": vehicle["id"] if vehicle else None,
+                "odometer": max(odometer, 0),
+                "start_odometer": start_odo,
+                "end_odometer": end_odo,
+                "distance_km": distance_km,
+            },
             conn=conn,
         )
         conn.commit()
@@ -3886,10 +4215,12 @@ def mobile_work_end_save(
     if state["status"] != "finished":
         now = app_now().isoformat(timespec="seconds")
         with db() as conn:
+            start_odo, end_odo, distance_km = odometer_log_values(conn, company_id, user["id"], log_work_date, "end", odometer)
             cur = conn.execute(
-                """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, vehicle_id, vehicle_name, odometer, alcohol_result, detector_used,
+                """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, vehicle_id, vehicle_name, odometer,
+                   start_odometer, end_odometer, distance_km, alcohol_result, detector_used,
                    intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     company_id,
                     user["id"],
@@ -3899,6 +4230,9 @@ def mobile_work_end_save(
                     vehicle["id"] if vehicle else None,
                     vehicle_name,
                     max(odometer, 0),
+                    start_odo,
+                    end_odo,
+                    distance_km,
                     alcohol_result or "OK",
                     detector_used,
                     "無",
@@ -3921,7 +4255,15 @@ def mobile_work_end_save(
                 "work_logs",
                 cur.lastrowid,
                 "Mobile end work log saved",
-                after={"work_date": log_work_date, "logged_at": logged_at, "vehicle_id": vehicle["id"] if vehicle else None, "odometer": max(odometer, 0)},
+                after={
+                    "work_date": log_work_date,
+                    "logged_at": logged_at,
+                    "vehicle_id": vehicle["id"] if vehicle else None,
+                    "odometer": max(odometer, 0),
+                    "start_odometer": start_odo,
+                    "end_odometer": end_odo,
+                    "distance_km": distance_km,
+                },
                 conn=conn,
             )
             conn.commit()
@@ -4058,27 +4400,7 @@ async def save_delivery(
                 data = data[:max_size]
             filename = f"user{user['id']}_{work_date.replace('-', '')}_{now_dt.strftime('%H%M%S%f')}{suffix}"
             public_path, _ = save_inspection_image(data, filename, inspection_image.content_type or "", "inspection_slips", SLIP_UPLOAD_DIR)
-            with db() as conn:
-                conn.execute(
-                    """INSERT INTO inspection_slips(company_id, user_id, delivery_id, slip_date, file_path, original_filename, content_type, uploaded_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(user_id, slip_date) DO UPDATE SET delivery_id=excluded.delivery_id,
-                       company_id=excluded.company_id, file_path=excluded.file_path, original_filename=excluded.original_filename,
-                       content_type=excluded.content_type, uploaded_at=excluded.uploaded_at""",
-                    (company_id, user["id"], delivery["id"], work_date, public_path, inspection_image.filename or "", inspection_image.content_type or "", now),
-                )
-                conn.execute("UPDATE deliveries SET inspection_sheet_path=?, updated_at=? WHERE id=? AND company_id=?", (public_path, now, delivery["id"], company_id))
-                audit_log(
-                    company_id,
-                    user,
-                    "inspection_slip.upsert",
-                    "inspection_slips",
-                    delivery["id"],
-                    "Inspection slip image saved",
-                    after={"delivery_id": delivery["id"], "work_date": work_date, "image_path": public_path},
-                    conn=conn,
-                )
-                conn.commit()
+            save_inspection_slip_record(company_id, user["id"], delivery["id"], work_date, public_path, inspection_image.filename or filename, inspection_image.content_type or "")
     return RedirectResponse(f"/deliveries?day={work_date}", status_code=303)
 
 
@@ -4137,6 +4459,30 @@ def inspection_sheets_page(request: Request, day: Optional[str] = None, member_i
     return render(request, "inspection_member.html", {"target": target, "sheets": sheets})
 
 
+@app.get("/admin/inspection-retention", response_class=HTMLResponse)
+def inspection_retention_page(request: Request, user=Depends(require_admin)):
+    require_feature(user, "inspection")
+    company_id = company_id_for(user)
+    today_s = app_today().isoformat()
+    rows = query_all(
+        """SELECT 'sheet' AS image_type, s.id, s.user_id, u.name, COALESCE(s.delivery_date, s.sheet_date) AS image_date,
+                  s.file_path, s.storage_path, s.public_url, s.uploaded_at, s.retention_until
+           FROM inspection_sheets s
+           JOIN users u ON u.id=s.user_id AND u.company_id=s.company_id
+           WHERE s.company_id=? AND COALESCE(s.retention_until, '')<>'' AND s.retention_until<?
+           UNION ALL
+           SELECT 'slip' AS image_type, s.id, s.user_id, u.name, s.slip_date AS image_date,
+                  s.file_path, s.storage_path, s.public_url, s.uploaded_at, s.retention_until
+           FROM inspection_slips s
+           JOIN users u ON u.id=s.user_id AND u.company_id=s.company_id
+           WHERE s.company_id=? AND COALESCE(s.retention_until, '')<>'' AND s.retention_until<?
+           ORDER BY retention_until, uploaded_at
+           LIMIT 200""",
+        (company_id, today_s, company_id, today_s),
+    )
+    return render(request, "inspection_retention.html", {"rows": attach_image_info(rows), "today": today_s})
+
+
 @app.post("/inspection-sheets")
 async def upload_inspection_sheet(sheet_date: str = Form(...), image: UploadFile = File(...), user=Depends(require_user)):
     require_feature(user, "inspection")
@@ -4149,14 +4495,13 @@ async def upload_inspection_sheet(sheet_date: str = Form(...), image: UploadFile
     now = now_dt.isoformat(timespec="seconds")
     suffix = safe_upload_name(image.filename)
     filename = f"user{user['id']}_{sheet_date.replace('-', '')}_{now_dt.strftime('%H%M%S%f')}{suffix}"
-    disk_path = UPLOAD_DIR / filename
     data = await image.read()
     if not data:
         raise HTTPException(status_code=400, detail="画像ファイルが空です")
     if len(data) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="画像サイズは10MB以内にしてください")
-    disk_path.write_bytes(data)
-    public_path = upload_to_supabase_storage("inspection_sheets", filename, data, image.content_type or "") or f"/uploads/inspection_sheets/{filename}"
+    public_path, disk_path = save_image_data_for_ocr(data, filename, image.content_type or "", "inspection_sheets", UPLOAD_DIR)
+    storage_meta = inspection_storage_meta("inspection_sheets", filename, public_path, now_dt)
     ocr_text = extract_ocr_text(disk_path)
     extracted = extract_inspection_fields(ocr_text, fallback_date=sheet_date)
     delivery_date = extracted["work_date"] or sheet_date
@@ -4164,15 +4509,18 @@ async def upload_inspection_sheet(sheet_date: str = Form(...), image: UploadFile
     company_id = company_id_for(user)
     with db() as conn:
         conn.execute(
-            """INSERT INTO inspection_sheets(company_id, user_id, sheet_date, delivery_date, file_path, original_filename, content_type,
-               ocr_status, ocr_text, ocr_completed, ocr_pickup, ocr_acceptance, ocr_received, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """INSERT INTO inspection_sheets(company_id, user_id, sheet_date, delivery_date, file_path, storage_path, public_url, signed_url,
+               original_filename, content_type, ocr_status, ocr_text, ocr_completed, ocr_pickup, ocr_acceptance, ocr_received,
+               uploaded_at, retention_until, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(user_id, sheet_date) DO UPDATE SET file_path=excluded.file_path,
-               company_id=excluded.company_id, delivery_date=excluded.delivery_date,
+               company_id=excluded.company_id, delivery_date=excluded.delivery_date, storage_path=excluded.storage_path,
+               public_url=excluded.public_url, signed_url=excluded.signed_url,
                original_filename=excluded.original_filename, content_type=excluded.content_type,
                ocr_status=excluded.ocr_status, ocr_text=excluded.ocr_text,
                ocr_completed=excluded.ocr_completed, ocr_pickup=excluded.ocr_pickup,
                ocr_acceptance=excluded.ocr_acceptance, ocr_received=excluded.ocr_received,
+               uploaded_at=excluded.uploaded_at, retention_until=excluded.retention_until,
                created_at=excluded.created_at""",
             (
                 company_id,
@@ -4180,6 +4528,9 @@ async def upload_inspection_sheet(sheet_date: str = Form(...), image: UploadFile
                 sheet_date,
                 delivery_date,
                 public_path,
+                storage_meta["storage_path"],
+                storage_meta["public_url"],
+                storage_meta["signed_url"],
                 image.filename or "",
                 image.content_type or "",
                 ocr_status,
@@ -4188,6 +4539,8 @@ async def upload_inspection_sheet(sheet_date: str = Form(...), image: UploadFile
                 extracted["pickup"],
                 extracted["acceptance"],
                 extracted["received"],
+                storage_meta["uploaded_at"],
+                storage_meta["retention_until"],
                 now,
             ),
         )
@@ -4714,6 +5067,38 @@ def areas_page(request: Request, user=Depends(require_admin)):
     return render(request, "areas.html", {"depots": depots, "districts": districts, "towns": towns})
 
 
+@app.post("/admin/areas/depots")
+def save_depot(depot_id: str = Form(""), name: str = Form(...), user=Depends(require_admin)):
+    require_feature(user, "multi_depot")
+    company_id = company_id_for(user)
+    name = name.strip()
+    if not name:
+        return RedirectResponse("/admin/areas", status_code=303)
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        if depot_id:
+            execute("UPDATE depots SET name=? WHERE id=? AND company_id=?", (name, depot_id, company_id))
+        else:
+            execute("INSERT INTO depots(company_id, name, created_at) VALUES (?, ?, ?)", (company_id, name, now))
+    except DB_INTEGRITY_ERROR:
+        raise HTTPException(status_code=400, detail="同じ拠点名が既に使われています")
+    return RedirectResponse("/admin/areas", status_code=303)
+
+
+@app.post("/admin/areas/depots/{depot_id}/delete")
+def delete_depot(depot_id: int, user=Depends(require_admin)):
+    require_feature(user, "multi_depot")
+    company_id = company_id_for(user)
+    execute("UPDATE depots SET active=0 WHERE id=? AND company_id=?", (depot_id, company_id))
+    execute("UPDATE districts SET active=0 WHERE depot_id=? AND company_id=?", (depot_id, company_id))
+    execute(
+        """UPDATE towns SET active=0
+           WHERE company_id=? AND district_id IN (SELECT id FROM districts WHERE depot_id=? AND company_id=?)""",
+        (company_id, depot_id, company_id),
+    )
+    return RedirectResponse("/admin/areas", status_code=303)
+
+
 @app.post("/admin/areas/districts")
 def save_district(district_id: str = Form(""), depot_id: int = Form(...), name: str = Form(...), user=Depends(require_admin)):
     require_feature(user, "multi_depot")
@@ -4760,13 +5145,203 @@ def delete_town(town_id: int, user=Depends(require_admin)):
     return RedirectResponse("/admin/areas", status_code=303)
 
 
+def build_daily_report_rows(company_id: int, start_date: str, end_date: str, member_id: int = 0, vehicle_id: int = 0):
+    member_clause = ""
+    vehicle_clause_logs = ""
+    vehicle_clause_deliveries = ""
+    log_params = [company_id, start_date, end_date]
+    delivery_params = [company_id, start_date, end_date]
+    if member_id:
+        member_clause = " AND u.id=?"
+        log_params.append(member_id)
+        delivery_params.append(member_id)
+    if vehicle_id:
+        vehicle_clause_logs = " AND COALESCE(w.vehicle_id, 0)=?"
+        vehicle_clause_deliveries = " AND COALESCE(d.vehicle_id, 0)=?"
+        log_params.append(vehicle_id)
+        delivery_params.append(vehicle_id)
+    logs = query_all(
+        f"""SELECT w.*, u.name AS driver_name, u.vehicle AS user_vehicle, v.name AS vehicle_master_name, v.plate_number
+            FROM work_logs w
+            JOIN users u ON u.id=w.user_id AND u.company_id=w.company_id
+            LEFT JOIN vehicles v ON v.id=w.vehicle_id AND v.company_id=w.company_id
+            WHERE w.company_id=? AND w.work_date BETWEEN ? AND ? {member_clause} {vehicle_clause_logs}
+            ORDER BY w.work_date, u.name, w.logged_at""",
+        log_params,
+    )
+    deliveries = query_all(
+        f"""SELECT d.*, u.name AS driver_name, u.vehicle AS user_vehicle, v.name AS vehicle_master_name, v.plate_number
+            FROM deliveries d
+            JOIN users u ON u.id=d.user_id AND u.company_id=d.company_id
+            LEFT JOIN vehicles v ON v.id=d.vehicle_id AND v.company_id=d.company_id
+            WHERE d.company_id=? AND d.work_date BETWEEN ? AND ? {member_clause} {vehicle_clause_deliveries}
+            ORDER BY d.work_date, u.name""",
+        delivery_params,
+    )
+    records = {}
+    for log in logs:
+        key = (log["user_id"], log["work_date"])
+        record = records.setdefault(key, {"date": log["work_date"], "driver": log["driver_name"], "logs": {}, "delivery": None, "vehicle": ""})
+        vehicle_text = row_value(log, "vehicle_name") or row_value(log, "vehicle_master_name") or row_value(log, "user_vehicle", "")
+        plate = row_value(log, "plate_number", "")
+        record["vehicle"] = record["vehicle"] or (f"{vehicle_text} {plate}".strip() if plate else vehicle_text)
+        log_type = row_value(log, "log_type", "")
+        if log_type == "start":
+            current = record["logs"].get("start")
+            if not current or str(log["logged_at"]) < str(current["logged_at"]):
+                record["logs"]["start"] = log
+        elif log_type == "end":
+            current = record["logs"].get("end")
+            if not current or str(log["logged_at"]) > str(current["logged_at"]):
+                record["logs"]["end"] = log
+    for delivery in deliveries:
+        key = (delivery["user_id"], delivery["work_date"])
+        record = records.setdefault(key, {"date": delivery["work_date"], "driver": delivery["driver_name"], "logs": {}, "delivery": None, "vehicle": ""})
+        vehicle_text = row_value(delivery, "vehicle_name") or row_value(delivery, "vehicle_master_name") or row_value(delivery, "user_vehicle", "")
+        plate = row_value(delivery, "plate_number", "")
+        record["vehicle"] = record["vehicle"] or (f"{vehicle_text} {plate}".strip() if plate else vehicle_text)
+        record["delivery"] = delivery
+    rows = []
+    for _, record in sorted(records.items(), key=lambda item: (item[1]["date"], item[1]["driver"])):
+        start_log = record["logs"].get("start")
+        end_log = record["logs"].get("end")
+        delivery = record.get("delivery")
+        start_odo = int_value(row_value(end_log, "start_odometer") or row_value(start_log, "start_odometer") or row_value(start_log, "odometer"))
+        end_odo = int_value(row_value(end_log, "end_odometer") or row_value(end_log, "odometer"))
+        distance_km = int_value(row_value(end_log, "distance_km"))
+        if not distance_km and start_odo and end_odo:
+            distance_km = max(end_odo - start_odo, 0)
+        notes = []
+        for log in (start_log, end_log):
+            if row_value(log, "notes"):
+                notes.append(row_value(log, "notes"))
+        if row_value(delivery, "memo"):
+            notes.append(row_value(delivery, "memo"))
+        rows.append(
+            {
+                "date": record["date"],
+                "driver": record["driver"],
+                "vehicle": record["vehicle"],
+                "start_time": row_value(start_log, "logged_at", "")[11:16] if row_value(start_log, "logged_at") else "",
+                "end_time": row_value(end_log, "logged_at", "")[11:16] if row_value(end_log, "logged_at") else "",
+                "roll_call": "実施" if start_log or end_log else "",
+                "alcohol": " / ".join([row_value(log, "alcohol_result", "") for log in (start_log, end_log) if row_value(log, "alcohol_result", "")]),
+                "start_odometer": start_odo or "",
+                "end_odometer": end_odo or "",
+                "distance_km": distance_km or "",
+                "completed": int_value(row_value(delivery, "completed")) if delivery else 0,
+                "transfer": int_value(row_value(delivery, "transfer")) if delivery else 0,
+                "night": int_value(row_value(delivery, "night")) if delivery else 0,
+                "pickup": int_value(row_value(delivery, "pickup")) if delivery else 0,
+                "large": int_value(row_value(delivery, "large")) if delivery else 0,
+                "rest_minutes": int_value(row_value(end_log, "rest_minutes") or row_value(start_log, "rest_minutes")),
+                "waiting_minutes": int_value(row_value(end_log, "waiting_minutes") or row_value(start_log, "waiting_minutes")),
+                "loading_minutes": int_value(row_value(end_log, "loading_minutes") or row_value(start_log, "loading_minutes")),
+                "notes": " / ".join(notes),
+            }
+        )
+    return rows
+
+
 @app.get("/admin/safety", response_class=HTMLResponse)
 def admin_safety(request: Request, user=Depends(require_admin)):
     require_feature(user, "safety")
     company_id = company_id_for(user)
     logs = query_all("""SELECT w.*, u.name FROM work_logs w JOIN users u ON u.id=w.user_id WHERE w.company_id=? ORDER BY w.logged_at DESC LIMIT 100""", (company_id,))
     members = query_all("SELECT id, name FROM users WHERE role='member' AND company_id=? ORDER BY active DESC, name LIMIT 200", (company_id,))
-    return render(request, "admin_safety.html", {"logs": logs, "members": members})
+    vehicles = vehicle_rows_for_company(company_id, include_inactive=True)
+    return render(request, "admin_safety.html", {"logs": logs, "members": members, "vehicles": vehicles})
+
+
+@app.get("/admin/safety/daily-report.pdf")
+def admin_safety_daily_report_pdf(
+    start_date: str = "",
+    end_date: str = "",
+    member_id: int = 0,
+    vehicle_id: int = 0,
+    user=Depends(require_admin),
+):
+    require_feature(user, "safety")
+    company_id = company_id_for(user)
+    today = app_today()
+    start = parse_iso_date(start_date) or today.replace(day=1)
+    end = parse_iso_date(end_date) or today
+    if end < start:
+        start, end = end, start
+    if member_id and not query_one("SELECT id FROM users WHERE id=? AND company_id=? AND role='member'", (member_id, company_id)):
+        raise HTTPException(status_code=404, detail="メンバーが見つかりません")
+    if vehicle_id and not query_one("SELECT id FROM vehicles WHERE id=? AND company_id=?", (vehicle_id, company_id)):
+        raise HTTPException(status_code=404, detail="車両が見つかりません")
+    rows = build_daily_report_rows(company_id, start.isoformat(), end.isoformat(), member_id, vehicle_id)
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+    except ImportError:
+        raise HTTPException(status_code=500, detail="PDF出力には reportlab が必要です")
+    buffer = io.BytesIO()
+    font_name = "HeiseiKakuGo-W5"
+    try:
+        pdfmetrics.registerFont(UnicodeCIDFont(font_name))
+    except Exception:
+        font_name = "Helvetica"
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), leftMargin=18, rightMargin=18, topMargin=18, bottomMargin=18)
+    styles = getSampleStyleSheet()
+    for style in styles.byName.values():
+        style.fontName = font_name
+        style.fontSize = 7
+        style.leading = 9
+    company = query_one("SELECT name FROM companies WHERE id=?", (company_id,))
+    title = Paragraph(f"{row_value(company, 'name', APP_NAME)} 業務記録 日報 ({start.isoformat()} - {end.isoformat()})", styles["Title"])
+    headers = ["日付", "運転者", "車両番号", "出勤", "退勤", "点呼", "アルコール", "開始km", "終了km", "走行km", "完了", "転送", "夜間", "集荷", "大型", "休憩", "待機", "荷役", "備考"]
+    table_rows = [headers]
+    for row in rows:
+        table_rows.append(
+            [
+                row["date"],
+                row["driver"],
+                row["vehicle"],
+                row["start_time"],
+                row["end_time"],
+                row["roll_call"],
+                row["alcohol"],
+                row["start_odometer"],
+                row["end_odometer"],
+                row["distance_km"],
+                row["completed"],
+                row["transfer"],
+                row["night"],
+                row["pickup"],
+                row["large"],
+                row["rest_minutes"],
+                row["waiting_minutes"],
+                row["loading_minutes"],
+                Paragraph(row["notes"] or "", styles["BodyText"]),
+            ]
+        )
+    if len(table_rows) == 1:
+        table_rows.append(["対象データなし"] + [""] * (len(headers) - 1))
+    widths = [38, 50, 62, 32, 32, 32, 58, 36, 36, 36, 26, 26, 26, 26, 26, 28, 28, 28, 126]
+    table = Table(table_rows, colWidths=widths, repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, -1), font_name),
+                ("FONTSIZE", (0, 0), (-1, -1), 6),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2ff")),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cbd5e1")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+            ]
+        )
+    )
+    doc.build([title, Spacer(1, 8), table])
+    filename = f"daily_report_{start.isoformat()}_{end.isoformat()}.pdf"
+    headers_out = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return Response(buffer.getvalue(), media_type="application/pdf", headers=headers_out)
 
 
 @app.get("/admin/safety/print", response_class=HTMLResponse)

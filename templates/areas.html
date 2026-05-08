@@ -3,6 +3,16 @@
 <h1>配達エリア管理</h1>
 <p class="notice">将来は拠点を増やして「光ヶ丘郵便局」「玉川郵便局」などに分けられる設計です。現在は地区と町会を管理します。</p>
 
+<section class="panel">
+  <h2>拠点を追加・編集</h2>
+  <form method="post" action="/admin/areas/depots" class="formgrid">
+    <label>編集ID（新規は空）<input name="depot_id" placeholder="下の表のID"></label>
+    <label>拠点名<input name="name" placeholder="例：高松ベース" required></label>
+    <button class="primary">拠点を保存</button>
+  </form>
+  {% if not depots %}<p class="notice">この会社の配達エリアはまだありません。まず拠点を追加してください。</p>{% endif %}
+</section>
+
 <div class="grid two">
   <section class="panel">
     <h2>地区を追加・編集</h2>
@@ -33,6 +43,16 @@
 </div>
 
 <div class="grid two">
+  <section class="panel tablewrap">
+    <h2>拠点一覧</h2>
+    <table><tr><th>ID</th><th>拠点</th><th></th></tr>
+      {% for p in depots %}
+      <tr><td>{{ p.id }}</td><td>{{ p.name }}</td><td><form method="post" action="/admin/areas/depots/{{ p.id }}/delete"><button class="danger">削除</button></form></td></tr>
+      {% else %}
+      <tr><td colspan="3">拠点は未登録です。</td></tr>
+      {% endfor %}
+    </table>
+  </section>
   <section class="panel tablewrap">
     <h2>地区一覧</h2>
     <table><tr><th>ID</th><th>拠点</th><th>地区</th><th></th></tr>

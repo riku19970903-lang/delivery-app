@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="flow-shell">
+<section class="flow-shell field-terminal">
   <div class="flow-page-head">
-    <p class="flow-eyebrow">退勤フロー</p>
+    <p class="flow-eyebrow">STEP 4 / 4</p>
     <h1>読み取り結果を確認</h1>
     <p>OCR結果を確認して、違うところだけ直して保存してください。</p>
   </div>
@@ -22,10 +22,10 @@
     <div class="ocr-result">
       <b>OCR読み取り結果</b>
       <p>日付: {{ ocr_result.work_date or work_date }}</p>
-      <p>配達完了: {{ ocr_result.completed }} / 引受・集荷: {{ ocr_result.pickup }}</p>
+      <p>完了: {{ ocr_result.completed }} / 引受・集荷: {{ ocr_result.pickup }}</p>
       {% if ocr_result.received %}<p>受入: {{ ocr_result.received }}</p>{% endif %}
       {% if not ocr_result.raw_text %}
-      <p class="hint">OCRで文字を読み取れない場合も、下の数値を直して保存できます。</p>
+      <p class="hint">OCRで文字を読み取れない場合も、下の数字を直して保存できます。</p>
       {% endif %}
     </div>
 
@@ -44,7 +44,7 @@
       <input type="date" name="work_date" value="{{ work_date }}" required>
     </label>
     <div class="flow-count-grid">
-      <label>配達完了<input type="number" name="completed" value="{{ counts.completed }}" min="0" inputmode="numeric"></label>
+      <label>完了<input type="number" name="completed" value="{{ counts.completed }}" min="0" inputmode="numeric"></label>
       <label>転送<input type="number" name="transfer" value="{{ counts.transfer }}" min="0" inputmode="numeric"></label>
       <label>夜間<input type="number" name="night" value="{{ counts.night }}" min="0" inputmode="numeric"></label>
       <label>集荷<input type="number" name="pickup" value="{{ counts.pickup }}" min="0" inputmode="numeric"></label>
@@ -52,8 +52,8 @@
     </div>
 
     <div class="flow-actions">
-      <a class="button" href="/mobile/work/end">戻って撮り直す</a>
-      <button class="flow-submit end">退勤登録</button>
+      <a class="button" href="/mobile/work/end">戻って修正</a>
+      <button class="flow-submit end">この内容で退勤完了</button>
     </div>
   </form>
 </section>

@@ -6,7 +6,7 @@
   <title>{{ title or "SPARKLE DRIVE" }}</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body class="{% if user %}role-{{ user.role }}{% else %}role-guest{% endif %}">
   <header class="topbar">
     <a class="brand" href="/">SPARKLE DRIVE</a>
     {% if user %}
@@ -29,5 +29,18 @@
   <main class="container">
     {% block content %}{% endblock %}
   </main>
+  {% if user and user.role == 'member' %}
+  <nav class="mobile-bottom-nav" aria-label="スマホ下部メニュー">
+    <a href="/member"><span>⌂</span><b>ホーム</b></a>
+    {% if feature_enabled('safety') and feature_enabled('deliveries') %}
+    <a class="primary-tab" href="/mobile/work/end"><span>＋</span><b>業務</b></a>
+    {% elif feature_enabled('deliveries') %}
+    <a class="primary-tab" href="/deliveries"><span>＋</span><b>業務</b></a>
+    {% endif %}
+    {% if feature_enabled('shifts') %}<a href="/member/shifts"><span>□</span><b>シフト</b></a>{% endif %}
+    {% if feature_enabled('vehicle') %}<a href="/mobile/vehicle"><span>◇</span><b>車両</b></a>{% endif %}
+    <a href="/settings"><span>⚙</span><b>設定</b></a>
+  </nav>
+  {% endif %}
 </body>
 </html>

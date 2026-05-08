@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>2ヶ月超過画像の削除候補</h1>
+<p class="notice">この画面は削除対象の確認用です。自動削除はまだ行いません。</p>
+<section class="panel tablewrap">
+  <table>
+    <tr><th>種別</th><th>日付</th><th>メンバー</th><th>保存先</th><th>アップロード</th><th>保持期限</th><th>画像</th></tr>
+    {% for r in rows %}
+    <tr>
+      <td>{{ "点検表" if r.image_type == "sheet" else "退勤点検写真" }}</td>
+      <td>{{ r.image_date }}</td>
+      <td>{{ r.name }}</td>
+      <td>{{ r.storage_path or r.file_path }}</td>
+      <td>{{ r.uploaded_at }}</td>
+      <td>{{ r.retention_until }}</td>
+      <td>{% if r.image_available %}<a class="button mini-button" href="{{ r.image_view_url }}" target="_blank">確認</a>{% elif r.image_missing %}<span class="alert mini-badge">{{ r.image_label }}</span>{% else %}<span class="hint">画像なし</span>{% endif %}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">削除候補はありません。</td></tr>
+    {% endfor %}
+  </table>
+</section>
+{% endblock %}

@@ -1,20 +1,21 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="flow-shell">
-  <div class="flow-page-head">
+<section class="flow-shell field-terminal">
+  <div class="flow-page-head end-flow-head">
     <p class="flow-eyebrow">退勤フロー</p>
     <h1>退勤する</h1>
-    <p>終了点呼、配達個数、点検表をまとめて登録します。</p>
+    <p>走行距離、配達個数、アルコールチェックの順番で登録します。</p>
   </div>
 
-  <form method="post" action="/mobile/work/end/preview" class="flow-card flow-step-form" enctype="multipart/form-data">
+  <form id="mobile-end-form" method="post" action="/mobile/work/end" class="flow-card flow-step-form" enctype="multipart/form-data">
     <input type="hidden" name="work_date" value="{{ work_date }}">
+    <input type="hidden" name="log_date" value="{{ work_date }}">
 
     <div class="flow-step active" data-step="1">
-      <span class="step-count">STEP 1 / 4</span>
-      <h2>車両と終了走行距離</h2>
+      <span class="step-count">STEP 1 / 3</span>
+      <h2>本日の最終走行距離</h2>
       {% if vehicles %}
-      <label>本日使った車両
+      <label>今日使った車両
         <select name="vehicle_id">
           {% for vehicle in vehicles %}
           <option value="{{ vehicle.id }}" {% if selected_vehicle and vehicle.id == selected_vehicle.id %}selected{% endif %}>{{ vehicle.name }}{% if vehicle.plate_number %}（{{ vehicle.plate_number }}）{% endif %}</option>
@@ -25,27 +26,29 @@
       <input type="hidden" name="vehicle_id" value="0">
       <p class="alert">車両が未登録です。管理者に車両登録を依頼してください。</p>
       {% endif %}
-      <label>本日の終了走行距離
-        <input type="number" name="odometer" value="{{ last_odometer if last_odometer else '' }}" min="0" inputmode="numeric" placeholder="例: 12580" required>
+      <label>最終走行距離
+        <input type="number" name="odometer" value="{{ last_odometer if last_odometer else '' }}" min="0" inputmode="numeric" placeholder="例：12580" required>
       </label>
       <button type="button" class="flow-next">次へ</button>
     </div>
 
     <div class="flow-step" data-step="2">
-      <span class="step-count">STEP 2 / 4</span>
-      <h2>アルコールチェック</h2>
-      <label>日時
-        <input type="datetime-local" name="logged_at" value="{{ logged_at }}" required>
-      </label>
-      <label>アルコール数値または結果
-        <input name="alcohol_result" value="0.00" placeholder="例: 0.00 / OK" required>
-      </label>
-      <label>検知器使用
-        <select name="detector_used">
-          <option>有</option>
-          <option>無</option>
-        </select>
-      </label>
+      <span class="step-count">STEP 2 / 3</span>
+      <h2>配達個数</h2>
+      <div class="flow-count-grid">
+        <label>完了<input type="number" name="completed" value="{{ counts.completed }}" min="0" inputmode="numeric"></label>
+        <label>転送<input type="number" name="transfer" value="{{ counts.transfer }}" min="0" inputmode="numeric"></label>
+        <label>夜間<input type="number" name="night" value="{{ counts.night }}" min="0" inputmode="numeric"></label>
+        <label>集荷<input type="number" name="pickup" value="{{ counts.pickup }}" min="0" inputmode="numeric"></label>
+        <label>大型<input type="number" name="large" value="{{ counts.large }}" min="0" inputmode="numeric"></label>
+      </div>
+      <div class="inspection-lite">
+        <label>点検表写真（任意）
+          <input id="mobile-inspection-image" type="file" name="inspection_image" accept="image/jpeg,image/png,image/webp" capture="environment">
+        </label>
+        <small>写真を選んだ場合だけ、OCR確認画面で手直しできます。</small>
+        <img id="mobile-inspection-preview" class="thumb large-thumb hidden" alt="点検表プレビュー">
+      </div>
       <div class="flow-actions">
         <button type="button" class="flow-back">戻る</button>
         <button type="button" class="flow-next">次へ</button>
@@ -53,45 +56,26 @@
     </div>
 
     <div class="flow-step" data-step="3">
-      <span class="step-count">STEP 3 / 4</span>
-      <h2>配達個数</h2>
-      <div class="flow-count-grid">
-        <label>配達完了<input type="number" name="completed" value="{{ counts.completed }}" min="0" inputmode="numeric"></label>
-        <label>転送<input type="number" name="transfer" value="{{ counts.transfer }}" min="0" inputmode="numeric"></label>
-        <label>夜間<input type="number" name="night" value="{{ counts.night }}" min="0" inputmode="numeric"></label>
-        <label>集荷<input type="number" name="pickup" value="{{ counts.pickup }}" min="0" inputmode="numeric"></label>
-        <label>大型<input type="number" name="large" value="{{ counts.large }}" min="0" inputmode="numeric"></label>
-      </div>
-      {% if ocr_result.completed or ocr_result.pickup %}
-      <div class="ocr-result">
-        <b>直近の点検表OCR候補</b>
-        <p>日付: {{ ocr_result.work_date }}</p>
-        <p>配達完了: {{ ocr_result.completed }} / 引受・集荷: {{ ocr_result.pickup }}</p>
-      </div>
-      {% endif %}
-      <div class="flow-actions">
-        <button type="button" class="flow-back">戻る</button>
-        <button type="button" class="flow-next">次へ</button>
-      </div>
-    </div>
-
-    <div class="flow-step" data-step="4">
-      <span class="step-count">STEP 4 / 4</span>
-      <h2>点検表撮影</h2>
-      <label>点検表写真 任意
-        <input id="mobile-inspection-image" type="file" name="inspection_image" accept="image/jpeg,image/png,image/webp" capture="environment">
+      <span class="step-count">STEP 3 / 3</span>
+      <h2>アルコールチェック</h2>
+      <label>退勤時刻
+        <input type="datetime-local" name="logged_at" value="{{ logged_at }}" required>
       </label>
-      <div class="preview-box">
-        <p class="field-title">写真プレビュー</p>
-        <img id="mobile-inspection-preview" class="thumb large-thumb hidden" alt="点検表プレビュー">
-        <p id="mobile-inspection-empty" class="hint">写真を選ぶと、確認画面でOCR結果を表示します。</p>
-      </div>
+      <label>アルコール結果
+        <input name="alcohol_result" value="0.00" placeholder="例：0.00 / OK" required>
+      </label>
+      <label>検知器使用
+        <select name="detector_used">
+          <option>有</option>
+          <option>無</option>
+        </select>
+      </label>
       <label>メモ
         <textarea name="notes" placeholder="必要な時だけ入力"></textarea>
       </label>
       <div class="flow-actions">
         <button type="button" class="flow-back">戻る</button>
-        <button class="flow-submit end">OCR確認へ</button>
+        <button class="flow-submit end">退勤登録</button>
       </div>
     </div>
   </form>
@@ -100,6 +84,7 @@
 <script>
   document.querySelectorAll(".flow-step-form").forEach((form) => {
     const steps = [...form.querySelectorAll(".flow-step")];
+    const imageInput = document.getElementById("mobile-inspection-image");
     let index = 0;
     const show = () => steps.forEach((step, i) => step.classList.toggle("active", i === index));
     form.querySelectorAll(".flow-next").forEach((button) => button.addEventListener("click", () => {
@@ -116,6 +101,7 @@
     }));
     form.addEventListener("submit", () => {
       if (form.dataset.saving === "1") return;
+      form.action = imageInput && imageInput.files && imageInput.files.length ? "/mobile/work/end/preview" : "/mobile/work/end";
       form.dataset.saving = "1";
       form.querySelectorAll("button").forEach((button) => {
         button.disabled = true;
@@ -126,14 +112,12 @@
 
   const imageInput = document.getElementById("mobile-inspection-image");
   const preview = document.getElementById("mobile-inspection-preview");
-  const empty = document.getElementById("mobile-inspection-empty");
   if (imageInput && preview) {
     imageInput.addEventListener("change", () => {
       const file = imageInput.files && imageInput.files[0];
       if (!file) return;
       preview.src = URL.createObjectURL(file);
       preview.classList.remove("hidden");
-      if (empty) empty.style.display = "none";
     });
   }
 </script>

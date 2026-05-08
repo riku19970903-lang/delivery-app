@@ -11,6 +11,20 @@
     </div>
   </div>
 
+  <section class="flow-today-shift">
+    <div>
+      <span>本日のシフト</span>
+      {% if today_shift %}
+      <b>{{ today_shift.area_short_text or today_shift.area_text or today_shift.area_label or "配達エリア未設定" }}</b>
+      <small>車両：{{ vehicle_name or "未設定" }}</small>
+      <small>{{ today_shift.status }}{% if today_shift.start_time or today_shift.end_time %} / {{ today_shift.start_time or "開始未定" }}→{{ today_shift.end_time or "終了未定" }}{% endif %}</small>
+      {% else %}
+      <b>本日のシフト未定</b>
+      <small>シフトが決まったらここに表示されます</small>
+      {% endif %}
+    </div>
+  </section>
+
   <div class="flow-alert-stack">
     {% if vehicle_alert.inspection_level %}
     <div class="flow-alert {{ vehicle_alert.inspection_level }}">{{ vehicle_alert.inspection_message }}</div>
@@ -87,21 +101,6 @@
     </div>
   </section>
 
-  {% if feature_enabled('shifts') %}
-  <section class="flow-mini-panel">
-    <h2>今日のシフト</h2>
-    {% if today_shift %}
-    <div class="flow-shift-card">
-      <b>{{ today_shift.status }}</b>
-      {% if today_shift.status != "休み" %}
-      <span>{{ today_shift.area_short_text or today_shift.area_text or "配達エリア未設定" }}</span>
-      {% endif %}
-    </div>
-    {% else %}
-    <div class="flow-shift-card empty">本日のシフト未定</div>
-    {% endif %}
-  </section>
-  {% endif %}
 </section>
 
 <div class="desktop-home">

@@ -12,6 +12,7 @@
     <label>会社名<input name="name" required placeholder="例：○○配送"></label>
     <label>会社コード<input name="code" required placeholder="例：MARU-001"></label>
     <label>管理者ログインID<input name="admin_username" required autocomplete="off"></label>
+    <label>管理者メール<input type="email" name="admin_email" placeholder="再設定用メール"></label>
     <label>管理者パスワード<input name="admin_password" type="password" required autocomplete="new-password"></label>
     <label>状態
       <select name="status">
@@ -30,6 +31,7 @@
     <label>会社名<input name="name" value="{{ c.name }}" required></label>
     <label>会社コード<input name="code" value="{{ c.code or '' }}" required></label>
     <label>管理者ログインID<input name="admin_username" value="{{ c.admin_username or '' }}" required autocomplete="off"></label>
+    <label>管理者メール<input type="email" name="admin_email" value="{{ c.admin_email or '' }}"></label>
     <label>管理者パスワード<input name="admin_password" type="password" placeholder="変更時だけ入力" autocomplete="new-password"></label>
     <label>状態
       <select name="status">
@@ -132,9 +134,11 @@
   <h2>管理者アカウント</h2>
   <form method="post" action="/admin/settings/account" class="formgrid" onsubmit="return confirm('管理者のログイン情報を変更します。保存しますか？');">
     <label>ログインID<input name="username" value="{{ user.username }}" required autocomplete="username"></label>
+    <label>メール<input type="email" name="email" value="{{ user.email or '' }}" autocomplete="email"></label>
     <label>新しいパスワード<input name="password" type="password" placeholder="変更時だけ入力" autocomplete="new-password"></label>
     <button class="primary">管理者情報を保存</button>
   </form>
+  <p class="hint"><a href="/admin/password-resets">パスワード再設定リンクを確認</a></p>
 </section>
 
 {% if feature_enabled('members') %}
@@ -145,6 +149,7 @@
     <input type="hidden" name="member_id" value="{{ m.id }}">
     <label>名前<input value="{{ m.name }}" readonly></label>
     <label>ログインID<input name="username" value="{{ m.username }}" required autocomplete="off"></label>
+    <label>メール<input type="email" name="email" value="{{ m.email or '' }}"></label>
     <label>新しいパスワード<input name="password" type="password" placeholder="変更時だけ入力" autocomplete="new-password"></label>
     <label>状態<input value="{{ '在籍中' if m.active else '退職済み' }}" readonly></label>
     <button class="primary">保存</button>

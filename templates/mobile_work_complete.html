@@ -1,15 +1,15 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="flow-shell">
+<section class="flow-shell field-terminal">
   <div class="flow-page-head complete">
-    <p class="flow-eyebrow">本日のまとめ</p>
+    <p class="flow-eyebrow">退勤完了</p>
     <h1>お疲れ様でした！</h1>
-    <p>{{ target }} の売上と配達数です。</p>
+    <p>{{ target }} の配達数と今日の報酬概算です。</p>
   </div>
 
   <div class="flow-summary-grid complete-grid">
     <div class="flow-summary-card emphasis">
-      <span>今日の売上見込み</span>
+      <span>今日の報酬（概算）</span>
       <b>{{ "{:,}".format(reward) }}円</b>
     </div>
     <div class="flow-summary-card">
@@ -24,7 +24,7 @@
 
   {% if delivery %}
   <section class="flow-mini-panel">
-    <h2>内訳</h2>
+    <h2>本日の内訳</h2>
     <div class="flow-count-readonly">
       <span>転送 {{ delivery.transfer }}個</span>
       <span>夜間 {{ delivery.night }}個</span>
