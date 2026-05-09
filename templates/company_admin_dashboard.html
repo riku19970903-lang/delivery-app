@@ -19,6 +19,18 @@
     <a href="/admin/settings"><span>設</span><b>設定</b></a>
   </div>
 
+  <section class="admin-mobile-section">
+    <h2>本日の出勤状況</h2>
+    <div class="admin-status-grid">
+      <div><span>対象</span><b>{{ mobile_work_counts.member_total }}</b></div>
+      <div><span>出勤済</span><b>{{ mobile_work_counts.started }}</b></div>
+      <div><span>退勤済</span><b>{{ mobile_work_counts.finished }}</b></div>
+      <div class="{{ 'warn' if mobile_work_counts.not_started else '' }}"><span>未出勤</span><b>{{ mobile_work_counts.not_started }}</b></div>
+      <div class="{{ 'warn' if mobile_work_counts.not_finished else '' }}"><span>未退勤</span><b>{{ mobile_work_counts.not_finished }}</b></div>
+      <div><span>個数入力</span><b>{{ mobile_work_counts.delivery_done }}</b></div>
+    </div>
+  </section>
+
   {% if feature_enabled('deliveries') %}
   <section class="admin-mobile-section">
     <h2>本日のみんなの配達状況</h2>

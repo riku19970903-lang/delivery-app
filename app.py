@@ -2994,6 +2994,14 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
         "roll_call_missing": [row for row in mobile_delivery_status if not int_value(row["has_start"]) or not int_value(row["has_end"])],
         "inspection_missing": [row for row in mobile_delivery_status if not int_value(row["has_inspection"])],
     }
+    mobile_work_counts = {
+        "member_total": len(mobile_delivery_status),
+        "started": sum(1 for row in mobile_delivery_status if int_value(row["has_start"])),
+        "finished": sum(1 for row in mobile_delivery_status if int_value(row["has_end"])),
+        "not_started": len(mobile_missing_status["not_started"]),
+        "not_finished": len(mobile_missing_status["not_finished"]),
+        "delivery_done": sum(1 for row in mobile_delivery_status if row_value(row, "delivery_id")),
+    }
     upcoming_shifts = attach_shift_areas(
         query_all(
             """SELECT s.*, u.name, d.name AS district_name, t.name AS town_name
@@ -3071,6 +3079,7 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
             "holiday_status": holiday_status,
             "mobile_delivery_status": mobile_delivery_status,
             "mobile_missing_status": mobile_missing_status,
+            "mobile_work_counts": mobile_work_counts,
             "mobile_shift_days": shifts_by_mobile_day,
             "open_vehicle_issues": open_vehicle_issues,
             "priority_notifications": notifications,
@@ -4772,13 +4781,10 @@ def apply_inspection_sheet_counts(
     return RedirectResponse(f"/deliveries?day={target_date}", status_code=303)
 
 
-@app.get("/rewards", response_class=HTMLResponse)
-def rewards_page(request: Request, ym: Optional[str] = None, member_id: Optional[int] = None, user=Depends(require_user)):
-    require_feature(user, "rewards")
-    start, end = month_bounds(ym)
-    viewing_user_id = user["id"]
-    members = []
+def reward_target_for_user(user, member_id: Optional[int] = None):
     company_id = company_id_for(user)
+    members = []
+    viewing_user_id = user["id"]
     if user["role"] == "admin":
         members = query_all("SELECT id, name FROM users WHERE role='member' AND active=1 AND company_id=? ORDER BY name LIMIT 200", (company_id,))
         if member_id:
@@ -4786,6 +4792,10 @@ def rewards_page(request: Request, ym: Optional[str] = None, member_id: Optional
             viewing_user_id = selected["id"] if selected else (members[0]["id"] if members else user["id"])
         elif members:
             viewing_user_id = members[0]["id"]
+    return company_id, viewing_user_id, members
+
+
+def reward_daily_rows(company_id: int, viewing_user_id: int, start: date, end: date):
     rows = query_all(
         "SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date BETWEEN ? AND ? ORDER BY work_date",
         (viewing_user_id, company_id, start.isoformat(), end.isoformat()),
@@ -4799,10 +4809,43 @@ def rewards_page(request: Request, ym: Optional[str] = None, member_id: Optional
     for row in rows:
         monthly = rental_type == "monthly" and not monthly_deducted
         reward = calc_reward(row, rates, vehicle_rates, monthly_mode=monthly)
+        gross = calc_reward_gross(row, rates)
         monthly_deducted = monthly_deducted or monthly
-        daily.append({"row": row, "reward": reward})
+        daily.append({"row": row, "gross": gross, "vehicle_deduction": gross - reward, "reward": reward})
         total += reward
+    return daily, total
+
+
+@app.get("/rewards", response_class=HTMLResponse)
+def rewards_page(request: Request, ym: Optional[str] = None, member_id: Optional[int] = None, user=Depends(require_user)):
+    require_feature(user, "rewards")
+    start, end = month_bounds(ym)
+    company_id, viewing_user_id, members = reward_target_for_user(user, member_id)
+    daily, total = reward_daily_rows(company_id, viewing_user_id, start, end)
     return render(request, "rewards.html", {"daily": daily, "total": total, "ym": start.strftime("%Y-%m"), "members": members, "member_id": viewing_user_id})
+
+
+@app.get("/rewards/statement.csv")
+def rewards_statement_csv(ym: Optional[str] = None, member_id: Optional[int] = None, user=Depends(require_user)):
+    require_feature(user, "rewards")
+    start, end = month_bounds(ym)
+    company_id, viewing_user_id, _ = reward_target_for_user(user, member_id)
+    member = query_one("SELECT name FROM users WHERE id=? AND company_id=?", (viewing_user_id, company_id))
+    daily, total = reward_daily_rows(company_id, viewing_user_id, start, end)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(["対象月", start.strftime("%Y-%m")])
+    writer.writerow(["メンバー", row_value(member, "name", "")])
+    writer.writerow([])
+    writer.writerow(["日付", "完了", "転送", "夜間", "集荷/引受", "大型", "総額", "車両代控除", "日次報酬"])
+    for item in daily:
+        row = item["row"]
+        writer.writerow([row["work_date"], row["completed"], row["transfer"], row["night"], row["pickup"], row["large"], item["gross"], item["vehicle_deduction"], item["reward"]])
+    writer.writerow([])
+    writer.writerow(["月次報酬", "", "", "", "", "", "", "", total])
+    content = "\ufeff" + buffer.getvalue()
+    filename = f"reward_statement_{start.strftime('%Y%m')}_{viewing_user_id}.csv"
+    return Response(content=content, media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @app.get("/vehicle-issues", response_class=HTMLResponse)
