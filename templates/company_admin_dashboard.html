@@ -31,6 +31,69 @@
     </div>
   </section>
 
+  <section class="admin-mobile-section">
+    <h2>本日の勤務セッション</h2>
+    <div class="admin-session-list">
+      {% for s in today_sessions %}
+      <div class="admin-session-card {{ 'working' if s.status == 'working' else 'finished' }}">
+        <b>{{ s.name }} / {{ s.session_no }}回目</b>
+        <span>{{ s.start_time[11:16] if s.start_time else "--:--" }} → {{ s.end_time[11:16] if s.end_time else "未退勤" }}</span>
+        <small>{{ s.vehicle_name or s.plate_number or "車両未設定" }} / 走行 {{ s.distance_km or 0 }}km / 完了 {{ s.delivery_count or 0 }}</small>
+      </div>
+      {% else %}
+      <p class="hint">本日の勤務セッションはまだありません。</p>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="admin-mobile-section">
+    <h2>未退勤セッション</h2>
+    <div class="admin-alert-list">
+      {% for s in open_sessions %}
+      <div class="admin-alert-card orange">
+        <b>{{ s.name }} / {{ s.session_no }}回目</b>
+        <span>{{ s.start_time[11:16] if s.start_time else "--:--" }} から出勤中</span>
+        <small>{{ s.vehicle_name or "車両未設定" }}</small>
+      </div>
+      {% else %}
+      <p class="hint">未退勤セッションはありません。</p>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="admin-mobile-section">
+    <h2>メンバー別 本日合計</h2>
+    <div class="admin-delivery-cards">
+      {% for t in member_session_totals %}
+      <div class="admin-delivery-card done">
+        <div><b>{{ t.name }}</b><span>{{ t.session_count }}回 / {{ t.distance_km or 0 }}km</span></div>
+        <dl>
+          <div><dt>完了</dt><dd>{{ t.completed or 0 }}</dd></div>
+          <div><dt>転送</dt><dd>{{ t.transfer or 0 }}</dd></div>
+          <div><dt>夜間</dt><dd>{{ t.night or 0 }}</dd></div>
+          <div><dt>集荷</dt><dd>{{ t.pickup or 0 }}</dd></div>
+        </dl>
+      </div>
+      {% else %}
+      <p class="hint">本日合計はまだありません。</p>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="admin-mobile-section">
+    <h2>車両別 本日走行距離</h2>
+    <div class="admin-alert-list">
+      {% for v in vehicle_session_totals %}
+      <div class="admin-alert-card">
+        <b>{{ v.vehicle_name }}</b>
+        <span>{{ v.session_count }}回 / {{ v.distance_km or 0 }}km</span>
+      </div>
+      {% else %}
+      <p class="hint">車両別走行距離はまだありません。</p>
+      {% endfor %}
+    </div>
+  </section>
+
   {% if feature_enabled('deliveries') %}
   <section class="admin-mobile-section">
     <h2>本日のみんなの配達状況</h2>
@@ -135,6 +198,35 @@
       </div>
       {% else %}
       <p class="hint">優先通知はありません。</p>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="admin-mobile-section">
+    <h2>修正履歴</h2>
+    <div class="admin-alert-list">
+      {% for c in session_corrections[:8] %}
+      <div class="admin-alert-card">
+        <b>{{ c.member_name }} / {{ c.work_date }}</b>
+        <span>{{ c.changed_at }} / {{ c.actor_name or c.actor_id }}</span>
+        <small>{{ c.note or c.target_table }}</small>
+      </div>
+      {% else %}
+      <p class="hint">勤務記録の修正履歴はまだありません。</p>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="admin-mobile-section">
+    <h2>修正が多いメンバー</h2>
+    <div class="admin-alert-list">
+      {% for c in frequent_corrections %}
+      <div class="admin-alert-card yellow">
+        <b>{{ c.name }}</b>
+        <span>直近30日で {{ c.correction_count }} 件</span>
+      </div>
+      {% else %}
+      <p class="hint">目立つ修正件数はありません。</p>
       {% endfor %}
     </div>
   </section>

@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="flow-shell my-room">
+  <div class="flow-page-head">
+    <p class="flow-eyebrow">マイルーム</p>
+    <h1>{{ user.name }}さんの情報</h1>
+    <p>{{ company_name }} / 現在の状態: <b>{{ work_state.label }}</b></p>
+  </div>
+
+  {% if message %}<p class="notice">{{ message }}</p>{% endif %}
+  {% if error %}<p class="alert">{{ error }}</p>{% endif %}
+
+  <section class="panel">
+    <h2>自分の情報</h2>
+    <div class="profile-grid">
+      <div><span>氏名</span><b>{{ user.name }}</b></div>
+      <div><span>ログインID</span><b>{{ user.username }}</b></div>
+      <div><span>電話番号</span><b>{{ user.phone or "未設定" }}</b></div>
+      <div><span>メール</span><b>{{ user.email or "未設定" }}</b></div>
+      <div><span>よく使う車両</span><b>{{ selected_vehicle.name if selected_vehicle else (user.vehicle or "未設定") }}</b></div>
+      <div><span>今月の出勤日数</span><b>{{ attendance_days }}日</b></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>連絡先の変更</h2>
+    <form method="post" action="/my-room" class="formgrid">
+      <label>電話番号<input name="phone" value="{{ user.phone or '' }}"></label>
+      <label>メールアドレス<input type="email" name="email" value="{{ user.email or '' }}"></label>
+      <label>通知用メール<input type="email" name="notification_email" value="{{ user.notification_email or '' }}"></label>
+      <label>よく使う車両
+        <select name="vehicle_id">
+          <option value="0">変更しない</option>
+          {% for v in vehicles %}
+          <option value="{{ v.id }}" {% if selected_vehicle and v.id == selected_vehicle.id %}selected{% endif %}>{{ v.name }}{% if v.plate_number %} / {{ v.plate_number }}{% endif %}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>備考<textarea name="member_notes">{{ user.member_notes or '' }}</textarea></label>
+      <button class="primary">保存</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>単価・報酬</h2>
+    <div class="profile-grid">
+      <div><span>完了単価</span><b>{{ rates.delivery_unit if rates else 0 }}円</b></div>
+      <div><span>転送単価</span><b>{{ rates.transfer_unit if rates else 0 }}円</b></div>
+      <div><span>夜間加算</span><b>{{ rates.night_unit if rates else 0 }}円</b></div>
+      <div><span>集荷/引受</span><b>{{ rates.pickup_unit if rates else 0 }}円</b></div>
+      <div><span>大型加算</span><b>{{ rates.large_unit if rates else 0 }}円</b></div>
+      <div><span>車両代</span><b>{{ rates.vehicle_rental_type if rates else "none" }} / 日 {{ rates.vehicle_daily_fee if rates else 0 }}円 / 月 {{ rates.vehicle_monthly_fee if rates else 0 }}円</b></div>
+      <div><span>今月の完了数</span><b>{{ month_summary.completed_total }}個</b></div>
+      <div><span>今月の報酬目安</span><b>{{ "{:,}".format(month_summary.net_total) }}円</b></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>最近の勤務セッション</h2>
+    {% for s in sessions %}
+    <details class="session-edit-card">
+      <summary>{{ s.work_date }} / {{ s.session_no }}回目 / {{ s.start_time[11:16] if s.start_time else "--:--" }}〜{{ s.end_time[11:16] if s.end_time else "未退勤" }} / {{ s.vehicle_name or "車両未設定" }}</summary>
+      <form method="post" action="/my-room/work-sessions/{{ s.id }}/update" class="formgrid">
+        <label>出勤時刻<input type="datetime-local" name="start_time" value="{{ s.start_time[:16] if s.start_time else '' }}"></label>
+        <label>退勤時刻<input type="datetime-local" name="end_time" value="{{ s.end_time[:16] if s.end_time else '' }}"></label>
+        <label>車両<select name="vehicle_id"><option value="0">変更しない</option>{% for v in vehicles %}<option value="{{ v.id }}" {% if s.vehicle_id and v.id == s.vehicle_id %}selected{% endif %}>{{ v.name }}{% if v.plate_number %} / {{ v.plate_number }}{% endif %}</option>{% endfor %}</select></label>
+        <label>開始距離<input type="number" name="start_odometer" value="{{ s.start_odometer or 0 }}" min="0"></label>
+        <label>終了距離<input type="number" name="end_odometer" value="{{ s.end_odometer or 0 }}" min="0"></label>
+        <label>出勤アルコール<input name="alcohol_check_start" value="{{ s.alcohol_check_start }}"></label>
+        <label>退勤アルコール<input name="alcohol_check_end" value="{{ s.alcohol_check_end }}"></label>
+        <label>出勤点呼<input name="call_check_start" value="{{ s.call_check_start }}"></label>
+        <label>退勤点呼<input name="call_check_end" value="{{ s.call_check_end }}"></label>
+        <label>完了<input type="number" name="delivery_count" value="{{ s.delivery_count or 0 }}" min="0"></label>
+        <label>転送<input type="number" name="transfer_count" value="{{ s.transfer_count or 0 }}" min="0"></label>
+        <label>夜間<input type="number" name="night_count" value="{{ s.night_count or 0 }}" min="0"></label>
+        <label>集荷/引受<input type="number" name="pickup_count" value="{{ s.pickup_count or 0 }}" min="0"></label>
+        <label>大型<input type="number" name="large_count" value="{{ s.large_count or 0 }}" min="0"></label>
+        <label>点検表画像パス<input name="inspection_image_path" value="{{ s.inspection_image_path or '' }}" placeholder="再アップロード済みの画像パス"></label>
+        <label>備考<textarea name="notes">{{ s.notes }}</textarea></label>
+        <button class="primary">この勤務を修正</button>
+      </form>
+    </details>
+    {% else %}
+    <p class="hint">勤務セッションはまだありません。</p>
+    {% endfor %}
+  </section>
+
+  <section class="panel">
+    <h2>最近の修正履歴</h2>
+    {% for c in corrections %}
+    <p class="history-line">{{ c.changed_at }} / {{ c.actor_name or "本人" }} / {{ c.note or c.target_table }}</p>
+    {% else %}
+    <p class="hint">修正履歴はまだありません。</p>
+    {% endfor %}
+  </section>
+</section>
+{% endblock %}

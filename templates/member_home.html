@@ -73,6 +73,11 @@
       <b>今日の売上を見る</b>
       <small>配達数と報酬見込みを確認</small>
     </a>
+    <a class="flow-primary-action start restart" href="/mobile/work/start">
+      <span>追加稼働</span>
+      <b>再出勤する</b>
+      <small>午後便、応援、車両変更など2回目以降はこちら</small>
+    </a>
     {% endif %}
   </div>
   {% endif %}
@@ -98,20 +103,67 @@
 
   <section class="flow-mini-panel">
     <h2>別メニュー</h2>
-    <div class="flow-mini-grid">
-      <a class="flow-mini-button" href="/member"><span>ホ</span><b>ホーム</b></a>
-      {% if feature_enabled('safety') %}<a class="flow-mini-button work" href="/work-log"><span>点</span><b>出退勤・点呼</b></a>{% endif %}
-      {% if feature_enabled('deliveries') %}<a class="flow-mini-button delivery" href="/deliveries"><span>配</span><b>配達入力</b></a>{% endif %}
-      {% if feature_enabled('inspection') %}<a class="flow-mini-button inspection" href="/inspection-sheets"><span>検</span><b>点検表</b></a>{% endif %}
-      {% if feature_enabled('rewards') %}<a class="flow-mini-button reward" href="/rewards"><span>報</span><b>報酬</b><small>売上確認</small></a>{% endif %}
-      {% if feature_enabled('vehicle') %}<a class="flow-mini-button vehicle" href="/vehicles"><span>車</span><b>車両</b><small>{{ vehicle_name }}</small></a>{% endif %}
-      <div class="flow-mini-button info"><span>油</span><b>オイル交換日</b><small>{{ oil_change_date }}</small></div>
-      <div class="flow-mini-button info"><span>期</span><b>車検期限</b><small>{{ vehicle_inspection_due }}</small></div>
-      {% if feature_enabled('holidays') %}<a class="flow-mini-button" href="/holidays"><span>休</span><b>休み希望</b></a>{% endif %}
-      {% if feature_enabled('shifts') %}<a class="flow-mini-button" href="/member/shifts"><span>シ</span><b>シフト</b></a>{% endif %}
-      {% if feature_enabled('issues') %}<a class="flow-mini-button issue" href="/vehicle-issues"><span>不</span><b>不具合</b></a>{% endif %}
-      <a class="flow-mini-button" href="/settings"><span>設</span><b>設定</b></a>
-      <a class="flow-mini-button logout" href="/logout"><span>出</span><b>ログアウト</b></a>
+    <div class="flow-menu-categories">
+      <details class="flow-menu-category" open>
+        <summary><span>業</span><b>業務</b></summary>
+        <div class="flow-mini-grid">
+          <a class="flow-mini-button" href="/member"><span>ホ</span><b>ホーム</b></a>
+          {% if feature_enabled('safety') %}<a class="flow-mini-button work" href="/mobile/work/start"><span>出</span><b>出勤・点呼</b></a>{% endif %}
+          {% if feature_enabled('safety') %}<a class="flow-mini-button work" href="/mobile/work/end"><span>退</span><b>退勤・点呼</b></a>{% endif %}
+          {% if feature_enabled('deliveries') %}<a class="flow-mini-button delivery" href="/deliveries"><span>配</span><b>配達入力</b></a>{% endif %}
+          {% if feature_enabled('inspection') %}<a class="flow-mini-button inspection" href="/inspection-sheets"><span>検</span><b>点検表</b></a>{% endif %}
+        </div>
+      </details>
+      {% if feature_enabled('rewards') %}
+      <details class="flow-menu-category">
+        <summary><span>報</span><b>売上・報酬</b></summary>
+        <div class="flow-mini-grid">
+          <a class="flow-mini-button reward" href="/mobile/work/end/complete?day={{ today }}"><span>今</span><b>今日の報酬</b></a>
+          <a class="flow-mini-button reward" href="/rewards"><span>月</span><b>今月の報酬</b></a>
+          <a class="flow-mini-button reward" href="/my-room"><span>単</span><b>単価確認</b></a>
+          <a class="flow-mini-button reward" href="/rewards"><span>履</span><b>報酬履歴</b></a>
+        </div>
+      </details>
+      {% endif %}
+      <details class="flow-menu-category">
+        <summary><span>休</span><b>シフト・休み</b></summary>
+        <div class="flow-mini-grid">
+          {% if feature_enabled('shifts') %}<a class="flow-mini-button" href="/member/shifts"><span>今</span><b>今日のシフト</b></a>{% endif %}
+          {% if feature_enabled('shifts') %}<a class="flow-mini-button" href="/member/shifts"><span>月</span><b>今月のシフト</b></a>{% endif %}
+          {% if feature_enabled('holidays') %}<a class="flow-mini-button" href="/holidays"><span>休</span><b>休み希望</b></a>{% endif %}
+          {% if feature_enabled('holidays') %}<a class="flow-mini-button info" href="/holidays"><span>締</span><b>締切確認</b></a>{% endif %}
+        </div>
+      </details>
+      {% if feature_enabled('vehicle') %}
+      <details class="flow-menu-category">
+        <summary><span>車</span><b>車両</b></summary>
+        <div class="flow-mini-grid">
+          <a class="flow-mini-button vehicle" href="/vehicles"><span>情</span><b>車両情報</b><small>{{ vehicle_name }}</small></a>
+          <a class="flow-mini-button vehicle" href="/mobile/vehicle"><span>変</span><b>使用車両変更</b></a>
+          <div class="flow-mini-button info"><span>油</span><b>オイル交換</b><small>{{ oil_change_date }}</small></div>
+          <div class="flow-mini-button info"><span>期</span><b>車検期限</b><small>{{ vehicle_inspection_due }}</small></div>
+          {% if feature_enabled('issues') %}<a class="flow-mini-button issue" href="/vehicle-issues"><span>不</span><b>不具合報告</b></a>{% endif %}
+        </div>
+      </details>
+      {% endif %}
+      <details class="flow-menu-category">
+        <summary><span>自</span><b>マイルーム</b></summary>
+        <div class="flow-mini-grid">
+          <a class="flow-mini-button" href="/my-room"><span>情</span><b>自分の情報</b></a>
+          <a class="flow-mini-button" href="/my-room"><span>連</span><b>連絡先変更</b></a>
+          <a class="flow-mini-button" href="/my-room"><span>単</span><b>単価確認</b></a>
+          <a class="flow-mini-button" href="/settings"><span>鍵</span><b>ログイン情報</b></a>
+        </div>
+      </details>
+      <details class="flow-menu-category">
+        <summary><span>他</span><b>その他</b></summary>
+        <div class="flow-mini-grid">
+          {% if feature_enabled('issues') %}<a class="flow-mini-button issue" href="/vehicle-issues"><span>不</span><b>不具合報告</b></a>{% endif %}
+          <a class="flow-mini-button info" href="/member"><span>使</span><b>使い方</b></a>
+          <a class="flow-mini-button" href="/settings"><span>設</span><b>設定</b></a>
+          <a class="flow-mini-button logout" href="/logout"><span>出</span><b>ログアウト</b></a>
+        </div>
+      </details>
     </div>
   </section>
 

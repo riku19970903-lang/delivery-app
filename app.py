@@ -248,7 +248,7 @@ def _append_sql_clause(sql: str, clause: str) -> str:
 
 def _needs_returning_id(sql: str) -> bool:
     return bool(
-        re.match(r"^\s*INSERT\s+INTO\s+(users|vehicle_issues|companies|vehicles|work_logs|audit_logs)\b", sql, flags=re.IGNORECASE)
+        re.match(r"^\s*INSERT\s+INTO\s+(users|vehicle_issues|companies|vehicles|work_logs|work_log_sessions|work_log_corrections|audit_logs)\b", sql, flags=re.IGNORECASE)
         and "RETURNING" not in sql.upper()
         and "ON CONFLICT" not in sql.upper()
     )
@@ -921,6 +921,40 @@ def _init_db_schema():
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS work_log_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL DEFAULT 1,
+                user_id INTEGER NOT NULL,
+                work_date TEXT NOT NULL,
+                session_no INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'working',
+                start_time TEXT DEFAULT '',
+                end_time TEXT DEFAULT '',
+                start_log_id INTEGER,
+                end_log_id INTEGER,
+                vehicle_id INTEGER,
+                vehicle_name TEXT DEFAULT '',
+                start_odometer INTEGER NOT NULL DEFAULT 0,
+                end_odometer INTEGER NOT NULL DEFAULT 0,
+                distance_km INTEGER NOT NULL DEFAULT 0,
+                alcohol_check_start TEXT DEFAULT '',
+                alcohol_check_end TEXT DEFAULT '',
+                call_check_start TEXT DEFAULT '',
+                call_check_end TEXT DEFAULT '',
+                delivery_count INTEGER NOT NULL DEFAULT 0,
+                transfer_count INTEGER NOT NULL DEFAULT 0,
+                night_count INTEGER NOT NULL DEFAULT 0,
+                pickup_count INTEGER NOT NULL DEFAULT 0,
+                large_count INTEGER NOT NULL DEFAULT 0,
+                inspection_sheet_id INTEGER,
+                inspection_image_path TEXT DEFAULT '',
+                notes TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(start_log_id) REFERENCES work_logs(id),
+                FOREIGN KEY(end_log_id) REFERENCES work_logs(id)
+            );
             CREATE TABLE IF NOT EXISTS deliveries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 company_id INTEGER NOT NULL DEFAULT 1,
@@ -959,6 +993,22 @@ def _init_db_schema():
                 source TEXT DEFAULT '',
                 changed_at TEXT NOT NULL,
                 FOREIGN KEY(delivery_id) REFERENCES deliveries(id),
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(actor_id) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS work_log_corrections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL DEFAULT 1,
+                user_id INTEGER NOT NULL,
+                work_date TEXT NOT NULL,
+                work_log_id INTEGER,
+                session_id INTEGER,
+                target_table TEXT DEFAULT '',
+                before_data TEXT DEFAULT '',
+                after_data TEXT DEFAULT '',
+                actor_id INTEGER,
+                changed_at TEXT NOT NULL,
+                note TEXT DEFAULT '',
                 FOREIGN KEY(user_id) REFERENCES users(id),
                 FOREIGN KEY(actor_id) REFERENCES users(id)
             );
@@ -1178,6 +1228,8 @@ def _init_db_schema():
         ensure_column(conn, "users", "last_vehicle_id", "INTEGER")
         ensure_column(conn, "users", "oil_change_date", "TEXT DEFAULT ''")
         ensure_column(conn, "users", "vehicle_inspection_due", "TEXT DEFAULT ''")
+        ensure_column(conn, "users", "notification_email", "TEXT DEFAULT ''")
+        ensure_column(conn, "users", "member_notes", "TEXT DEFAULT ''")
         ensure_column(conn, "users", "active", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "users", "purged", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "users", "deleted_at", "TEXT DEFAULT ''")
@@ -1215,6 +1267,34 @@ def _init_db_schema():
         ensure_column(conn, "work_logs", "admin_confirm", "TEXT DEFAULT ''")
         ensure_column(conn, "work_logs", "notes", "TEXT DEFAULT ''")
         ensure_column(conn, "work_logs", "created_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_sessions", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "work_log_sessions", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_log_sessions", "work_date", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_sessions", "session_no", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "work_log_sessions", "status", "TEXT DEFAULT 'working'")
+        ensure_column(conn, "work_log_sessions", "start_time", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_sessions", "end_time", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_sessions", "start_log_id", "INTEGER")
+        ensure_column(conn, "work_log_sessions", "end_log_id", "INTEGER")
+        ensure_column(conn, "work_log_sessions", "vehicle_id", "INTEGER")
+        ensure_column(conn, "work_log_sessions", "vehicle_name", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_sessions", "start_odometer", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_log_sessions", "end_odometer", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_log_sessions", "distance_km", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_log_sessions", "alcohol_check_start", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_sessions", "alcohol_check_end", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_sessions", "call_check_start", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_sessions", "call_check_end", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_sessions", "delivery_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_log_sessions", "transfer_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_log_sessions", "night_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_log_sessions", "pickup_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_log_sessions", "large_count", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_log_sessions", "inspection_sheet_id", "INTEGER")
+        ensure_column(conn, "work_log_sessions", "inspection_image_path", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_sessions", "notes", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_sessions", "created_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_sessions", "updated_at", "TEXT DEFAULT ''")
         ensure_column(conn, "deliveries", "completed", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "deliveries", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "deliveries", "vehicle_id", "INTEGER")
@@ -1242,6 +1322,17 @@ def _init_db_schema():
         ensure_column(conn, "vehicles", "updated_at", "TEXT DEFAULT ''")
         ensure_column(conn, "delivery_corrections", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "delivery_corrections", "source", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_corrections", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "work_log_corrections", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_log_corrections", "work_date", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_corrections", "work_log_id", "INTEGER")
+        ensure_column(conn, "work_log_corrections", "session_id", "INTEGER")
+        ensure_column(conn, "work_log_corrections", "target_table", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_corrections", "before_data", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_corrections", "after_data", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_corrections", "actor_id", "INTEGER")
+        ensure_column(conn, "work_log_corrections", "changed_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_corrections", "note", "TEXT DEFAULT ''")
         ensure_column(conn, "shifts", "start_time", "TEXT DEFAULT ''")
         ensure_column(conn, "shifts", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "shifts", "end_time", "TEXT DEFAULT ''")
@@ -1303,6 +1394,12 @@ def _init_db_schema():
         ensure_column(conn, "audit_logs", "before_data", "TEXT DEFAULT ''")
         ensure_column(conn, "audit_logs", "after_data", "TEXT DEFAULT ''")
         ensure_column(conn, "audit_logs", "created_at", "TEXT DEFAULT ''")
+        for index_sql in (
+            "CREATE INDEX IF NOT EXISTS idx_work_log_sessions_company_date_user ON work_log_sessions(company_id, work_date, user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_work_log_sessions_open ON work_log_sessions(company_id, work_date, status)",
+            "CREATE INDEX IF NOT EXISTS idx_work_log_corrections_company_changed ON work_log_corrections(company_id, changed_at)",
+        ):
+            conn.execute(index_sql)
         conn.execute("INSERT OR IGNORE INTO companies(id, name, created_at) VALUES (1, ?, ?)", ("SPARKLE DRIVE", datetime.now().isoformat(timespec="seconds")))
         conn.execute("UPDATE companies SET status='利用中' WHERE COALESCE(status, '')=''")
         seed_feature_prices(conn)
@@ -2149,6 +2246,20 @@ def upcoming_member_shifts(user_id: int, today_s: str, company_id: Optional[int]
 
 
 def today_work_state(user_id: int, company_id: int, today_s: str):
+    sessions = query_all(
+        """SELECT * FROM work_log_sessions
+           WHERE user_id=? AND company_id=? AND work_date=?
+           ORDER BY session_no, id""",
+        (user_id, company_id, today_s),
+    )
+    if sessions:
+        open_session = None
+        for session in sessions:
+            if row_value(session, "status") == "working":
+                open_session = session
+        if open_session:
+            return {"status": "working", "label": f"出勤中（{open_session['session_no']}回目）", "start_log": None, "end_log": None, "sessions": sessions, "open_session": open_session}
+        return {"status": "finished", "label": f"退勤済（{len(sessions)}回）", "start_log": None, "end_log": None, "sessions": sessions, "open_session": None}
     start_log = query_one(
         """SELECT * FROM work_logs
            WHERE user_id=? AND company_id=? AND work_date=? AND log_type='start'
@@ -2298,6 +2409,209 @@ def odometer_log_values(conn, company_id: int, user_id: int, work_date: str, log
     start_odo = int_value(row_value(start_log, "start_odometer") or row_value(start_log, "odometer"))
     distance = max(current - start_odo, 0) if current and start_odo else 0
     return start_odo, current, distance
+
+
+def open_work_session(company_id: int, user_id: int, work_date: str):
+    return query_one(
+        """SELECT * FROM work_log_sessions
+           WHERE company_id=? AND user_id=? AND work_date=? AND status='working'
+           ORDER BY session_no DESC, id DESC LIMIT 1""",
+        (company_id, user_id, work_date),
+    )
+
+
+def next_work_session_no(conn, company_id: int, user_id: int, work_date: str):
+    row = conn.execute(
+        "SELECT COALESCE(MAX(session_no), 0) AS max_no FROM work_log_sessions WHERE company_id=? AND user_id=? AND work_date=?",
+        (company_id, user_id, work_date),
+    ).fetchone()
+    return int_value(row["max_no"]) + 1
+
+
+def session_delivery_totals(company_id: int, user_id: int, work_date: str):
+    return query_one(
+        """SELECT
+             COALESCE(SUM(delivery_count), 0) AS completed,
+             COALESCE(SUM(transfer_count), 0) AS transfer,
+             COALESCE(SUM(night_count), 0) AS night,
+             COALESCE(SUM(pickup_count), 0) AS pickup,
+             COALESCE(SUM(large_count), 0) AS large,
+             COUNT(*) AS session_count
+           FROM work_log_sessions
+           WHERE company_id=? AND user_id=? AND work_date=?""",
+        (company_id, user_id, work_date),
+    )
+
+
+def sync_delivery_from_sessions(company_id: int, user_id: int, work_date: str, actor_id: int, source: str = "勤務セッション集計", vehicle_id: Optional[int] = None, vehicle_name: str = "", image_path: str = ""):
+    totals = session_delivery_totals(company_id, user_id, work_date)
+    if not totals or int_value(row_value(totals, "session_count")) == 0:
+        return None
+    return upsert_delivery_counts(
+        company_id,
+        user_id,
+        work_date,
+        int_value(totals["completed"]),
+        int_value(totals["transfer"]),
+        int_value(totals["night"]),
+        int_value(totals["pickup"]),
+        int_value(totals["large"]),
+        "none",
+        source,
+        image_path,
+        actor_id,
+        source,
+        vehicle_id,
+        vehicle_name,
+    )
+
+
+def insert_work_log_correction(conn, company_id: int, user_id: int, work_date: str, work_log_id, session_id, target_table: str, before, after, actor_id: int, note: str = ""):
+    before_dict = row_to_dict(before)
+    after_dict = row_to_dict(after)
+    if before_dict == after_dict:
+        return
+    changed_at = app_now().isoformat(timespec="seconds")
+    cur = conn.execute(
+        """INSERT INTO work_log_corrections(company_id, user_id, work_date, work_log_id, session_id, target_table,
+           before_data, after_data, actor_id, changed_at, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            company_id,
+            user_id,
+            work_date,
+            work_log_id,
+            session_id,
+            target_table,
+            json.dumps(before_dict, ensure_ascii=False, default=str),
+            json.dumps(after_dict, ensure_ascii=False, default=str),
+            actor_id,
+            changed_at,
+            note,
+        ),
+    )
+    audit_log(
+        company_id,
+        {"id": actor_id, "role": ""},
+        f"{target_table}.correction",
+        target_table,
+        session_id or work_log_id or cur.lastrowid,
+        note or "Work record corrected",
+        before=before_dict,
+        after=after_dict,
+        conn=conn,
+    )
+
+
+def update_work_session_from_form(
+    session_id: int,
+    company_id: int,
+    actor,
+    user_id_guard: Optional[int] = None,
+    start_time: str = "",
+    end_time: str = "",
+    vehicle_id: int = 0,
+    start_odometer: int = 0,
+    end_odometer: int = 0,
+    alcohol_check_start: str = "",
+    alcohol_check_end: str = "",
+    call_check_start: str = "",
+    call_check_end: str = "",
+    delivery_count: int = 0,
+    transfer_count: int = 0,
+    night_count: int = 0,
+    pickup_count: int = 0,
+    large_count: int = 0,
+    inspection_image_path: str = "",
+    notes: str = "",
+):
+    guard_sql = " AND user_id=?" if user_id_guard else ""
+    guard_params = [user_id_guard] if user_id_guard else []
+    before = query_one(
+        f"SELECT * FROM work_log_sessions WHERE id=? AND company_id=?{guard_sql}",
+        [session_id, company_id] + guard_params,
+    )
+    if not before:
+        raise HTTPException(status_code=404, detail="勤務セッションが見つかりません")
+    vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=?", (vehicle_id, company_id)) if vehicle_id else None
+    vehicle_name = vehicle_label(vehicle) if vehicle else row_value(before, "vehicle_name", "")
+    start_time = start_time or row_value(before, "start_time", "")
+    end_time = end_time or row_value(before, "end_time", "")
+    start_odo = max(int_value(start_odometer), 0)
+    end_odo = max(int_value(end_odometer), 0)
+    distance_km = max(end_odo - start_odo, 0) if start_odo and end_odo else int_value(row_value(before, "distance_km"))
+    status = "finished" if end_time else "working"
+    inspection_image_path = inspection_image_path.strip() or row_value(before, "inspection_image_path", "")
+    now = app_now().isoformat(timespec="seconds")
+    with db() as conn:
+        conn.execute(
+            """UPDATE work_log_sessions
+               SET start_time=?, end_time=?, vehicle_id=?, vehicle_name=?, start_odometer=?, end_odometer=?,
+                   distance_km=?, status=?, alcohol_check_start=?, alcohol_check_end=?, call_check_start=?,
+                   call_check_end=?, delivery_count=?, transfer_count=?, night_count=?, pickup_count=?,
+                   large_count=?, inspection_image_path=?, notes=?, updated_at=?
+               WHERE id=? AND company_id=?""",
+            (
+                start_time,
+                end_time,
+                vehicle["id"] if vehicle else row_value(before, "vehicle_id"),
+                vehicle_name,
+                start_odo,
+                end_odo,
+                distance_km,
+                status,
+                alcohol_check_start,
+                alcohol_check_end,
+                call_check_start,
+                call_check_end,
+                max(delivery_count, 0),
+                max(transfer_count, 0),
+                max(night_count, 0),
+                max(pickup_count, 0),
+                max(large_count, 0),
+                inspection_image_path,
+                notes,
+                now,
+                session_id,
+                company_id,
+            ),
+        )
+        if row_value(before, "start_log_id"):
+            conn.execute(
+                """UPDATE work_logs
+                   SET logged_at=?, vehicle_id=?, vehicle_name=?, odometer=?, start_odometer=?,
+                       alcohol_result=?, health_status=?, notes=?
+                   WHERE id=? AND company_id=?""",
+                (start_time, vehicle["id"] if vehicle else row_value(before, "vehicle_id"), vehicle_name, start_odo, start_odo, alcohol_check_start, call_check_start, notes, before["start_log_id"], company_id),
+            )
+        if row_value(before, "end_log_id"):
+            conn.execute(
+                """UPDATE work_logs
+                   SET logged_at=?, vehicle_id=?, vehicle_name=?, odometer=?, start_odometer=?, end_odometer=?,
+                       distance_km=?, alcohol_result=?, detector_used=?, notes=?
+                   WHERE id=? AND company_id=?""",
+                (end_time, vehicle["id"] if vehicle else row_value(before, "vehicle_id"), vehicle_name, end_odo, start_odo, end_odo, distance_km, alcohol_check_end, call_check_end, notes, before["end_log_id"], company_id),
+            )
+        if vehicle:
+            conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=? AND company_id=?", (vehicle["id"], vehicle["name"], before["user_id"], company_id))
+        update_vehicle_odometer(conn, company_id, vehicle["id"] if vehicle else row_value(before, "vehicle_id"), vehicle_name, end_odo or start_odo, now)
+        after = conn.execute("SELECT * FROM work_log_sessions WHERE id=? AND company_id=?", (session_id, company_id)).fetchone()
+        insert_work_log_correction(
+            conn,
+            company_id,
+            before["user_id"],
+            before["work_date"],
+            row_value(before, "end_log_id") or row_value(before, "start_log_id"),
+            session_id,
+            "work_log_sessions",
+            before,
+            after,
+            row_value(actor, "id"),
+            "勤務セッション修正",
+        )
+        conn.commit()
+    sync_delivery_from_sessions(company_id, before["user_id"], before["work_date"], row_value(actor, "id"), "勤務セッション修正", vehicle["id"] if vehicle else row_value(before, "vehicle_id"), vehicle_name, inspection_image_path)
+    return after
 
 
 def parse_iso_date(value: str):
@@ -2514,7 +2828,7 @@ def upsert_delivery_counts(company_id: int, user_id: int, work_date: str, comple
 
 def save_inspection_slip_record(company_id: int, user_id: int, delivery_id: int, work_date: str, image_path: str, original_filename: str = "", content_type: str = ""):
     if not image_path:
-        return
+        return None
     now_dt = app_now()
     now = now_dt.isoformat(timespec="seconds")
     remote_filename = unquote(image_path.split("?", 1)[0].rstrip("/").split("/")[-1]) if is_remote_image_path(image_path) else ""
@@ -2539,17 +2853,19 @@ def save_inspection_slip_record(company_id: int, user_id: int, delivery_id: int,
             (company_id, user_id, delivery_id, work_date, image_path, storage_path, public_url, "", original_filename, content_type, now, retention),
         )
         conn.execute("UPDATE deliveries SET inspection_sheet_path=?, updated_at=? WHERE id=? AND company_id=?", (image_path, now, delivery_id, company_id))
+        slip = conn.execute("SELECT id FROM inspection_slips WHERE user_id=? AND company_id=? AND slip_date=?", (user_id, company_id, work_date)).fetchone()
         audit_log(
             company_id,
             {"id": user_id, "role": ""},
             "inspection_slip.upsert",
             "inspection_slips",
-            delivery_id,
+            row_value(slip, "id", delivery_id),
             "Inspection slip image saved",
             after={"delivery_id": delivery_id, "work_date": work_date, "image_path": image_path},
             conn=conn,
         )
         conn.commit()
+        return row_value(slip, "id")
 
 
 def extract_delivery_counts(ocr_text: str = ""):
@@ -2987,9 +3303,35 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
            ORDER BY u.name LIMIT 200""",
         (today_s, today_s, today_s, today_s, today_s, company_id),
     )
+    mobile_delivery_status = [dict(row) for row in mobile_delivery_status]
+    session_status_rows = query_all(
+        """SELECT user_id,
+                  COUNT(*) AS session_count,
+                  SUM(CASE WHEN status='working' THEN 1 ELSE 0 END) AS open_count,
+                  SUM(CASE WHEN status='finished' THEN 1 ELSE 0 END) AS finished_count,
+                  SUM(distance_km) AS distance_total,
+                  MAX(CASE WHEN COALESCE(inspection_image_path, '')<>'' OR inspection_sheet_id IS NOT NULL THEN 1 ELSE 0 END) AS has_session_inspection
+           FROM work_log_sessions
+           WHERE company_id=? AND work_date=?
+           GROUP BY user_id""",
+        (company_id, today_s),
+    )
+    session_status_map = {row["user_id"]: row for row in session_status_rows}
+    for row in mobile_delivery_status:
+        session_info = session_status_map.get(row["id"])
+        row["session_count"] = int_value(row_value(session_info, "session_count"))
+        row["open_session_count"] = int_value(row_value(session_info, "open_count"))
+        row["finished_session_count"] = int_value(row_value(session_info, "finished_count"))
+        row["distance_total"] = int_value(row_value(session_info, "distance_total"))
+        if row["session_count"]:
+            row["has_start"] = 1
+        if row["finished_session_count"]:
+            row["has_end"] = 1
+        if int_value(row_value(session_info, "has_session_inspection")):
+            row["has_inspection"] = 1
     mobile_missing_status = {
         "not_started": [row for row in mobile_delivery_status if not int_value(row["has_start"])],
-        "not_finished": [row for row in mobile_delivery_status if int_value(row["has_start"]) and not int_value(row["has_end"])],
+        "not_finished": [row for row in mobile_delivery_status if int_value(row.get("open_session_count")) or (int_value(row["has_start"]) and not int_value(row["has_end"]))],
         "delivery_missing": [row for row in mobile_delivery_status if not row_value(row, "delivery_id")],
         "roll_call_missing": [row for row in mobile_delivery_status if not int_value(row["has_start"]) or not int_value(row["has_end"])],
         "inspection_missing": [row for row in mobile_delivery_status if not int_value(row["has_inspection"])],
@@ -3002,6 +3344,54 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
         "not_finished": len(mobile_missing_status["not_finished"]),
         "delivery_done": sum(1 for row in mobile_delivery_status if row_value(row, "delivery_id")),
     }
+    today_sessions = query_all(
+        """SELECT s.*, u.name, v.plate_number
+           FROM work_log_sessions s
+           JOIN users u ON u.id=s.user_id AND u.company_id=s.company_id
+           LEFT JOIN vehicles v ON v.id=s.vehicle_id AND v.company_id=s.company_id
+           WHERE s.company_id=? AND s.work_date=?
+           ORDER BY s.session_no, s.start_time LIMIT 120""",
+        (company_id, today_s),
+    )
+    open_sessions = [session for session in today_sessions if row_value(session, "status") == "working"]
+    member_session_totals = query_all(
+        """SELECT u.name, s.user_id, COUNT(*) AS session_count, SUM(s.distance_km) AS distance_km,
+                  SUM(s.delivery_count) AS completed, SUM(s.transfer_count) AS transfer,
+                  SUM(s.night_count) AS night, SUM(s.pickup_count) AS pickup, SUM(s.large_count) AS large
+           FROM work_log_sessions s
+           JOIN users u ON u.id=s.user_id AND u.company_id=s.company_id
+           WHERE s.company_id=? AND s.work_date=?
+           GROUP BY s.user_id, u.name
+           ORDER BY u.name LIMIT 200""",
+        (company_id, today_s),
+    )
+    vehicle_session_totals = query_all(
+        """SELECT COALESCE(NULLIF(s.vehicle_name, ''), '車両未設定') AS vehicle_name,
+                  COUNT(*) AS session_count, SUM(s.distance_km) AS distance_km
+           FROM work_log_sessions s
+           WHERE s.company_id=? AND s.work_date=?
+           GROUP BY COALESCE(NULLIF(s.vehicle_name, ''), '車両未設定')
+           ORDER BY vehicle_name LIMIT 100""",
+        (company_id, today_s),
+    )
+    session_corrections = query_all(
+        """SELECT c.*, u.name AS member_name, a.name AS actor_name
+           FROM work_log_corrections c
+           JOIN users u ON u.id=c.user_id AND u.company_id=c.company_id
+           LEFT JOIN users a ON a.id=c.actor_id
+           WHERE c.company_id=?
+           ORDER BY c.changed_at DESC LIMIT 30""",
+        (company_id,),
+    )
+    frequent_corrections = query_all(
+        """SELECT u.name, COUNT(*) AS correction_count
+           FROM work_log_corrections c
+           JOIN users u ON u.id=c.user_id AND u.company_id=c.company_id
+           WHERE c.company_id=? AND c.changed_at>=?
+           GROUP BY c.user_id, u.name
+           ORDER BY correction_count DESC, u.name LIMIT 10""",
+        (company_id, (app_today() - timedelta(days=30)).isoformat()),
+    )
     upcoming_shifts = attach_shift_areas(
         query_all(
             """SELECT s.*, u.name, d.name AS district_name, t.name AS town_name
@@ -3080,6 +3470,12 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
             "mobile_delivery_status": mobile_delivery_status,
             "mobile_missing_status": mobile_missing_status,
             "mobile_work_counts": mobile_work_counts,
+            "today_sessions": today_sessions,
+            "open_sessions": open_sessions,
+            "member_session_totals": member_session_totals,
+            "vehicle_session_totals": vehicle_session_totals,
+            "session_corrections": session_corrections,
+            "frequent_corrections": frequent_corrections,
             "mobile_shift_days": shifts_by_mobile_day,
             "open_vehicle_issues": open_vehicle_issues,
             "priority_notifications": notifications,
@@ -3631,6 +4027,175 @@ def update_own_password(
     return RedirectResponse("/settings?message=" + quote("パスワードを変更しました"), status_code=303)
 
 
+@app.get("/my-room", response_class=HTMLResponse)
+def my_room_page(request: Request, message: str = "", error: str = "", user=Depends(require_user)):
+    if user["role"] == "admin":
+        return RedirectResponse("/admin", status_code=303)
+    company_id = company_id_for(user)
+    rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (user["id"], company_id))
+    month_summary = monthly_reward_summary(user["id"], app_today(), company_id)
+    attendance = query_one(
+        """SELECT COUNT(*) AS count FROM (
+             SELECT work_date FROM work_logs WHERE user_id=? AND company_id=?
+             UNION
+             SELECT work_date FROM work_log_sessions WHERE user_id=? AND company_id=?
+           ) days""",
+        (user["id"], company_id, user["id"], company_id),
+    )
+    sessions = query_all(
+        """SELECT s.*, v.plate_number FROM work_log_sessions s
+           LEFT JOIN vehicles v ON v.id=s.vehicle_id AND v.company_id=s.company_id
+           WHERE s.user_id=? AND s.company_id=?
+           ORDER BY s.work_date DESC, s.session_no DESC LIMIT 12""",
+        (user["id"], company_id),
+    )
+    corrections = query_all(
+        """SELECT c.*, a.name AS actor_name FROM work_log_corrections c
+           LEFT JOIN users a ON a.id=c.actor_id
+           WHERE c.user_id=? AND c.company_id=?
+           ORDER BY c.changed_at DESC LIMIT 20""",
+        (user["id"], company_id),
+    )
+    vehicles, selected_vehicle = selected_vehicle_context(user)
+    return render(
+        request,
+        "my_room.html",
+        {
+            "rates": rates,
+            "month_summary": month_summary,
+            "attendance_days": row_value(attendance, "count", 0),
+            "sessions": sessions,
+            "corrections": corrections,
+            "vehicles": vehicles,
+            "selected_vehicle": selected_vehicle,
+            "work_state": today_work_state(user["id"], company_id, app_today().isoformat()),
+            "message": message,
+            "error": error,
+        },
+    )
+
+
+@app.post("/my-room")
+def update_my_room(
+    phone: str = Form(""),
+    email: str = Form(""),
+    notification_email: str = Form(""),
+    vehicle_id: int = Form(0),
+    member_notes: str = Form(""),
+    user=Depends(require_user),
+):
+    if user["role"] == "admin":
+        raise HTTPException(status_code=403, detail="メンバーとしてログインしてください")
+    company_id = company_id_for(user)
+    before = query_one("SELECT * FROM users WHERE id=? AND company_id=?", (user["id"], company_id))
+    vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=? AND active=1", (vehicle_id, company_id)) if vehicle_id else None
+    with db() as conn:
+        conn.execute(
+            """UPDATE users SET phone=?, email=?, notification_email=?, last_vehicle_id=?,
+               vehicle=COALESCE(NULLIF(?, ''), vehicle), member_notes=?
+               WHERE id=? AND company_id=?""",
+            (phone.strip(), email.strip(), notification_email.strip(), vehicle["id"] if vehicle else row_value(before, "last_vehicle_id"), row_value(vehicle, "name", ""), member_notes.strip(), user["id"], company_id),
+        )
+        after = conn.execute("SELECT * FROM users WHERE id=? AND company_id=?", (user["id"], company_id)).fetchone()
+        audit_log(company_id, user, "member.my_room_update", "users", user["id"], "Member profile updated", before=row_to_dict(before), after=row_to_dict(after), conn=conn)
+        conn.commit()
+    return RedirectResponse("/my-room?message=" + quote("マイルームを更新しました"), status_code=303)
+
+
+@app.post("/my-room/work-sessions/{session_id}/update")
+def member_update_work_session(
+    session_id: int,
+    start_time: str = Form(""),
+    end_time: str = Form(""),
+    vehicle_id: int = Form(0),
+    start_odometer: int = Form(0),
+    end_odometer: int = Form(0),
+    alcohol_check_start: str = Form(""),
+    alcohol_check_end: str = Form(""),
+    call_check_start: str = Form(""),
+    call_check_end: str = Form(""),
+    delivery_count: int = Form(0),
+    transfer_count: int = Form(0),
+    night_count: int = Form(0),
+    pickup_count: int = Form(0),
+    large_count: int = Form(0),
+    inspection_image_path: str = Form(""),
+    notes: str = Form(""),
+    user=Depends(require_user),
+):
+    if user["role"] == "admin":
+        raise HTTPException(status_code=403, detail="メンバーとしてログインしてください")
+    update_work_session_from_form(
+        session_id,
+        company_id_for(user),
+        user,
+        user_id_guard=user["id"],
+        start_time=start_time,
+        end_time=end_time,
+        vehicle_id=vehicle_id,
+        start_odometer=start_odometer,
+        end_odometer=end_odometer,
+        alcohol_check_start=alcohol_check_start,
+        alcohol_check_end=alcohol_check_end,
+        call_check_start=call_check_start,
+        call_check_end=call_check_end,
+        delivery_count=delivery_count,
+        transfer_count=transfer_count,
+        night_count=night_count,
+        pickup_count=pickup_count,
+        large_count=large_count,
+        inspection_image_path=inspection_image_path,
+        notes=notes,
+    )
+    return RedirectResponse("/my-room?message=" + quote("勤務記録を修正しました"), status_code=303)
+
+
+@app.post("/admin/work-sessions/{session_id}/update")
+def admin_update_work_session(
+    session_id: int,
+    start_time: str = Form(""),
+    end_time: str = Form(""),
+    vehicle_id: int = Form(0),
+    start_odometer: int = Form(0),
+    end_odometer: int = Form(0),
+    alcohol_check_start: str = Form(""),
+    alcohol_check_end: str = Form(""),
+    call_check_start: str = Form(""),
+    call_check_end: str = Form(""),
+    delivery_count: int = Form(0),
+    transfer_count: int = Form(0),
+    night_count: int = Form(0),
+    pickup_count: int = Form(0),
+    large_count: int = Form(0),
+    inspection_image_path: str = Form(""),
+    notes: str = Form(""),
+    user=Depends(require_admin),
+):
+    require_feature(user, "safety")
+    update_work_session_from_form(
+        session_id,
+        company_id_for(user),
+        user,
+        start_time=start_time,
+        end_time=end_time,
+        vehicle_id=vehicle_id,
+        start_odometer=start_odometer,
+        end_odometer=end_odometer,
+        alcohol_check_start=alcohol_check_start,
+        alcohol_check_end=alcohol_check_end,
+        call_check_start=call_check_start,
+        call_check_end=call_check_end,
+        delivery_count=delivery_count,
+        transfer_count=transfer_count,
+        night_count=night_count,
+        pickup_count=pickup_count,
+        large_count=large_count,
+        inspection_image_path=inspection_image_path,
+        notes=notes,
+    )
+    return RedirectResponse("/admin/safety?message=" + quote("勤務セッションを修正しました"), status_code=303)
+
+
 @app.get("/admin/rates", response_class=HTMLResponse)
 def rates_page(request: Request, user=Depends(require_admin)):
     require_feature(user, "rewards")
@@ -4011,10 +4576,14 @@ def mobile_work_start_page(request: Request, user=Depends(require_user)):
     company_id = company_id_for(user)
     today_s = app_today().isoformat()
     state = today_work_state(user["id"], company_id, today_s)
-    if state["status"] != "not_started":
+    if state["status"] == "working":
         return RedirectResponse("/member", status_code=303)
     now_dt = app_now()
     vehicles, selected_vehicle = selected_vehicle_context(user)
+    next_no = query_one(
+        "SELECT COALESCE(MAX(session_no), 0) + 1 AS next_no FROM work_log_sessions WHERE company_id=? AND user_id=? AND work_date=?",
+        (company_id, user["id"], today_s),
+    )
     return render(
         request,
         "mobile_work_start.html",
@@ -4025,6 +4594,8 @@ def mobile_work_start_page(request: Request, user=Depends(require_user)):
             "vehicle_name": vehicle_label(selected_vehicle),
             "vehicles": vehicles,
             "selected_vehicle": selected_vehicle,
+            "session_no": row_value(next_no, "next_no", 1),
+            "is_restart": state["status"] == "finished",
         },
     )
 
@@ -4046,7 +4617,7 @@ def mobile_work_start(
         raise HTTPException(status_code=403, detail="メンバーとしてログインしてください")
     company_id = company_id_for(user)
     state = today_work_state(user["id"], company_id, work_date)
-    if state["status"] != "not_started":
+    if state["status"] == "working":
         return RedirectResponse("/member", status_code=303)
     vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=? AND active=1", (vehicle_id, company_id)) if vehicle_id else None
     vehicle_name = vehicle_label(vehicle) if vehicle else (row_value(user, "vehicle", "") or "")
@@ -4055,6 +4626,15 @@ def mobile_work_start(
     notes = " / ".join(part for part in [vehicle_note, notes.strip()] if part)
     now = app_now().isoformat(timespec="seconds")
     with db() as conn:
+        open_session = conn.execute(
+            """SELECT id FROM work_log_sessions
+               WHERE company_id=? AND user_id=? AND work_date=? AND status='working'
+               ORDER BY id DESC LIMIT 1""",
+            (company_id, user["id"], work_date),
+        ).fetchone()
+        if open_session:
+            return RedirectResponse("/member", status_code=303)
+        session_no = next_work_session_no(conn, company_id, user["id"], work_date)
         start_odo, end_odo, distance_km = odometer_log_values(conn, company_id, user["id"], work_date, "start", odometer)
         cur = conn.execute(
             """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, vehicle_id, vehicle_name, odometer,
@@ -4085,6 +4665,28 @@ def mobile_work_start(
                 now,
             ),
         )
+        session_cur = conn.execute(
+            """INSERT INTO work_log_sessions(company_id, user_id, work_date, session_no, status, start_time,
+               start_log_id, vehicle_id, vehicle_name, start_odometer, alcohol_check_start, call_check_start, notes, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                company_id,
+                user["id"],
+                work_date,
+                session_no,
+                "working",
+                logged_at,
+                cur.lastrowid,
+                vehicle["id"] if vehicle else None,
+                vehicle_name,
+                start_odo,
+                alcohol_result or "OK",
+                health_status or "良好",
+                notes,
+                now,
+                now,
+            ),
+        )
         if vehicle:
             conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=? AND company_id=?", (vehicle["id"], vehicle["name"], user["id"], company_id))
         update_vehicle_odometer(conn, company_id, vehicle["id"] if vehicle else None, vehicle_name, odometer, now)
@@ -4103,6 +4705,8 @@ def mobile_work_start(
                 "start_odometer": start_odo,
                 "end_odometer": end_odo,
                 "distance_km": distance_km,
+                "session_id": session_cur.lastrowid,
+                "session_no": session_no,
             },
             conn=conn,
         )
@@ -4131,6 +4735,7 @@ def mobile_work_end_page(request: Request, user=Depends(require_user)):
         return RedirectResponse("/mobile/work/start", status_code=303)
     if state["status"] == "finished":
         return RedirectResponse(f"/mobile/work/end/complete?day={today_s}", status_code=303)
+    open_session = state.get("open_session")
     delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user["id"], company_id, today_s))
     sheet = query_one(
         """SELECT * FROM inspection_sheets
@@ -4149,22 +4754,36 @@ def mobile_work_end_page(request: Request, user=Depends(require_user)):
             "received": row_value(sheet, "ocr_received", 0) or extracted["received"],
             "raw_text": (row_value(sheet, "ocr_text", "") or "").strip(),
         }
-    counts = {
-        "completed": delivery["completed"] if delivery else ocr_result["completed"],
-        "transfer": delivery["transfer"] if delivery else 0,
-        "night": delivery["night"] if delivery else 0,
-        "pickup": delivery["pickup"] if delivery else ocr_result["pickup"],
-        "large": delivery["large"] if delivery else 0,
-    }
+    if open_session:
+        counts = {
+            "completed": int_value(row_value(open_session, "delivery_count")),
+            "transfer": int_value(row_value(open_session, "transfer_count")),
+            "night": int_value(row_value(open_session, "night_count")),
+            "pickup": int_value(row_value(open_session, "pickup_count")),
+            "large": int_value(row_value(open_session, "large_count")),
+        }
+    else:
+        counts = {
+            "completed": delivery["completed"] if delivery else ocr_result["completed"],
+            "transfer": delivery["transfer"] if delivery else 0,
+            "night": delivery["night"] if delivery else 0,
+            "pickup": delivery["pickup"] if delivery else ocr_result["pickup"],
+            "large": delivery["large"] if delivery else 0,
+        }
     now_dt = app_now()
     vehicles, selected_vehicle = selected_vehicle_context(user)
+    if open_session and row_value(open_session, "vehicle_id"):
+        selected_vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=?", (row_value(open_session, "vehicle_id"), company_id)) or selected_vehicle
+    last_odometer = int_value(row_value(open_session, "start_odometer")) if open_session else 0
+    if not last_odometer:
+        last_odometer = latest_vehicle_odometer(company_id, row_value(selected_vehicle, "id")) or latest_odometer_for_user(user["id"], company_id)
     return render(
         request,
         "mobile_work_end.html",
         {
             "work_date": today_s,
             "logged_at": now_dt.strftime("%Y-%m-%dT%H:%M"),
-            "last_odometer": latest_vehicle_odometer(company_id, row_value(selected_vehicle, "id")) or latest_odometer_for_user(user["id"], company_id),
+            "last_odometer": last_odometer,
             "counts": counts,
             "ocr_result": ocr_result,
             "vehicles": vehicles,
@@ -4199,6 +4818,8 @@ async def mobile_work_end_preview(
     state = today_work_state(user["id"], company_id, work_date)
     if state["status"] == "finished":
         return RedirectResponse(f"/mobile/work/end/complete?day={work_date}", status_code=303)
+    if state["status"] != "working":
+        return RedirectResponse("/mobile/work/start", status_code=303)
     log_date = work_date
     image_path = ""
     original_filename = ""
@@ -4285,84 +4906,116 @@ def mobile_work_end_save(
     if user["role"] == "admin":
         raise HTTPException(status_code=403, detail="メンバーとしてログインしてください")
     company_id = company_id_for(user)
-    vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=? AND active=1", (vehicle_id, company_id)) if vehicle_id else None
-    vehicle_name = vehicle_label(vehicle) if vehicle else ""
-    delivery = upsert_delivery_counts(
-        company_id,
-        user["id"],
-        work_date,
-        completed,
-        transfer,
-        night,
-        pickup,
-        large,
-        "none",
-        notes or "スマホ退勤フローから登録",
-        image_path,
-        user["id"],
-        "スマホ退勤フロー",
-        vehicle["id"] if vehicle else None,
-        vehicle_name,
-    )
-    if image_path:
-        save_inspection_slip_record(company_id, user["id"], delivery["id"], work_date, image_path, original_filename, content_type)
     log_work_date = log_date or app_today().isoformat()
     state = today_work_state(user["id"], company_id, log_work_date)
-    if state["status"] != "finished":
-        now = app_now().isoformat(timespec="seconds")
-        with db() as conn:
-            start_odo, end_odo, distance_km = odometer_log_values(conn, company_id, user["id"], log_work_date, "end", odometer)
-            cur = conn.execute(
-                """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, vehicle_id, vehicle_name, odometer,
-                   start_odometer, end_odometer, distance_km, alcohol_result, detector_used,
-                   intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+    if state["status"] != "working":
+        return RedirectResponse(f"/mobile/work/end/complete?day={work_date}", status_code=303)
+    open_session = state.get("open_session")
+    if not vehicle_id and open_session and row_value(open_session, "vehicle_id"):
+        vehicle_id = int_value(row_value(open_session, "vehicle_id"))
+    vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=? AND active=1", (vehicle_id, company_id)) if vehicle_id else None
+    vehicle_name = vehicle_label(vehicle) if vehicle else (row_value(open_session, "vehicle_name", "") if open_session else "")
+    logged_at_value = logged_at or app_now().strftime("%Y-%m-%dT%H:%M")
+    session_id = row_value(open_session, "id") if open_session else None
+    now = app_now().isoformat(timespec="seconds")
+    with db() as conn:
+        start_odo, end_odo, distance_km = odometer_log_values(conn, company_id, user["id"], log_work_date, "end", odometer)
+        if open_session:
+            start_odo = int_value(row_value(open_session, "start_odometer")) or start_odo
+            end_odo = max(odometer, 0)
+            distance_km = max(end_odo - start_odo, 0) if start_odo else distance_km
+        cur = conn.execute(
+            """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, vehicle_id, vehicle_name, odometer,
+               start_odometer, end_odometer, distance_km, alcohol_result, detector_used,
+               intoxicated, health_status, face_check, breath_check, voice_check, admin_confirm, notes, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                company_id,
+                user["id"],
+                log_work_date,
+                "end",
+                logged_at_value,
+                vehicle["id"] if vehicle else None,
+                vehicle_name,
+                max(odometer, 0),
+                start_odo,
+                max(odometer, 0),
+                distance_km,
+                alcohol_result or "OK",
+                detector_used,
+                "無",
+                "良好",
+                "問題なし",
+                "問題なし",
+                "問題なし",
+                "",
+                notes,
+                now,
+            ),
+        )
+        if open_session:
+            conn.execute(
+                """UPDATE work_log_sessions
+                   SET status='finished', end_time=?, end_log_id=?, vehicle_id=COALESCE(?, vehicle_id),
+                       vehicle_name=COALESCE(NULLIF(?, ''), vehicle_name), end_odometer=?, distance_km=?,
+                       alcohol_check_end=?, call_check_end=?, delivery_count=?, transfer_count=?,
+                       night_count=?, pickup_count=?, large_count=?, inspection_image_path=COALESCE(NULLIF(?, ''), inspection_image_path),
+                       notes=COALESCE(NULLIF(?, ''), notes), updated_at=?
+                   WHERE id=? AND company_id=? AND user_id=?""",
                 (
-                    company_id,
-                    user["id"],
-                    log_work_date,
-                    "end",
-                    logged_at or app_now().strftime("%Y-%m-%dT%H:%M"),
+                    logged_at_value,
+                    cur.lastrowid,
                     vehicle["id"] if vehicle else None,
                     vehicle_name,
                     max(odometer, 0),
-                    start_odo,
-                    end_odo,
                     distance_km,
                     alcohol_result or "OK",
-                    detector_used,
-                    "無",
-                    "良好",
-                    "問題なし",
-                    "問題なし",
-                    "問題なし",
-                    "",
+                    detector_used or "実施",
+                    max(completed, 0),
+                    max(transfer, 0),
+                    max(night, 0),
+                    max(pickup, 0),
+                    max(large, 0),
+                    image_path,
                     notes,
                     now,
+                    session_id,
+                    company_id,
+                    user["id"],
                 ),
             )
-            if vehicle:
-                conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=? AND company_id=?", (vehicle["id"], vehicle["name"], user["id"], company_id))
-            update_vehicle_odometer(conn, company_id, vehicle["id"] if vehicle else None, vehicle_name, odometer, now)
-            audit_log(
-                company_id,
-                user,
-                "work_log.end",
-                "work_logs",
-                cur.lastrowid,
-                "Mobile end work log saved",
-                after={
-                    "work_date": log_work_date,
-                    "logged_at": logged_at,
-                    "vehicle_id": vehicle["id"] if vehicle else None,
-                    "odometer": max(odometer, 0),
-                    "start_odometer": start_odo,
-                    "end_odometer": end_odo,
-                    "distance_km": distance_km,
-                },
-                conn=conn,
-            )
-            conn.commit()
+        if vehicle:
+            conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=? AND company_id=?", (vehicle["id"], vehicle["name"], user["id"], company_id))
+        update_vehicle_odometer(conn, company_id, vehicle["id"] if vehicle else None, vehicle_name, odometer, now)
+        audit_log(
+            company_id,
+            user,
+            "work_log.end",
+            "work_logs",
+            cur.lastrowid,
+            "Mobile end work log saved",
+            after={
+                "work_date": log_work_date,
+                "logged_at": logged_at_value,
+                "vehicle_id": vehicle["id"] if vehicle else None,
+                "odometer": max(odometer, 0),
+                "start_odometer": start_odo,
+                "end_odometer": max(odometer, 0),
+                "distance_km": distance_km,
+                "session_id": session_id,
+            },
+            conn=conn,
+        )
+        conn.commit()
+    if work_date == log_work_date and session_id:
+        delivery = sync_delivery_from_sessions(company_id, user["id"], work_date, user["id"], "スマホ退勤フロー", vehicle["id"] if vehicle else None, vehicle_name, image_path)
+    else:
+        delivery = upsert_delivery_counts(company_id, user["id"], work_date, completed, transfer, night, pickup, large, "none", notes or "スマホ退勤フローから登録", image_path, user["id"], "スマホ退勤フロー", vehicle["id"] if vehicle else None, vehicle_name)
+    slip_id = None
+    if image_path and delivery:
+        slip_id = save_inspection_slip_record(company_id, user["id"], delivery["id"], work_date, image_path, original_filename, content_type)
+    if slip_id and session_id:
+        execute("UPDATE work_log_sessions SET inspection_sheet_id=? WHERE id=? AND company_id=? AND user_id=?", (slip_id, session_id, company_id, user["id"]))
     return RedirectResponse(f"/mobile/work/end/complete?day={work_date}", status_code=303)
 
 
@@ -5279,17 +5932,31 @@ def build_daily_report_rows(company_id: int, start_date: str, end_date: str, mem
     member_clause = ""
     vehicle_clause_logs = ""
     vehicle_clause_deliveries = ""
+    vehicle_clause_sessions = ""
     log_params = [company_id, start_date, end_date]
     delivery_params = [company_id, start_date, end_date]
+    session_params = [company_id, start_date, end_date]
     if member_id:
         member_clause = " AND u.id=?"
         log_params.append(member_id)
         delivery_params.append(member_id)
+        session_params.append(member_id)
     if vehicle_id:
         vehicle_clause_logs = " AND COALESCE(w.vehicle_id, 0)=?"
         vehicle_clause_deliveries = " AND COALESCE(d.vehicle_id, 0)=?"
+        vehicle_clause_sessions = " AND COALESCE(s.vehicle_id, 0)=?"
         log_params.append(vehicle_id)
         delivery_params.append(vehicle_id)
+        session_params.append(vehicle_id)
+    sessions = query_all(
+        f"""SELECT s.*, u.name AS driver_name, u.vehicle AS user_vehicle, v.name AS vehicle_master_name, v.plate_number
+            FROM work_log_sessions s
+            JOIN users u ON u.id=s.user_id AND u.company_id=s.company_id
+            LEFT JOIN vehicles v ON v.id=s.vehicle_id AND v.company_id=s.company_id
+            WHERE s.company_id=? AND s.work_date BETWEEN ? AND ? {member_clause} {vehicle_clause_sessions}
+            ORDER BY s.work_date, u.name, s.session_no""",
+        session_params,
+    )
     logs = query_all(
         f"""SELECT w.*, u.name AS driver_name, u.vehicle AS user_vehicle, v.name AS vehicle_master_name, v.plate_number
             FROM work_logs w
@@ -5309,7 +5976,22 @@ def build_daily_report_rows(company_id: int, start_date: str, end_date: str, mem
         delivery_params,
     )
     records = {}
+    session_user_dates = {(session["user_id"], session["work_date"]) for session in sessions}
+    for session in sessions:
+        key = ("session", session["id"])
+        vehicle_text = row_value(session, "vehicle_name") or row_value(session, "vehicle_master_name") or row_value(session, "user_vehicle", "")
+        plate = row_value(session, "plate_number", "")
+        records[key] = {
+            "date": session["work_date"],
+            "driver": session["driver_name"],
+            "logs": {},
+            "delivery": None,
+            "session": session,
+            "vehicle": f"{vehicle_text} {plate}".strip() if plate else vehicle_text,
+        }
     for log in logs:
+        if (log["user_id"], log["work_date"]) in session_user_dates:
+            continue
         key = (log["user_id"], log["work_date"])
         record = records.setdefault(key, {"date": log["work_date"], "driver": log["driver_name"], "logs": {}, "delivery": None, "vehicle": ""})
         vehicle_text = row_value(log, "vehicle_name") or row_value(log, "vehicle_master_name") or row_value(log, "user_vehicle", "")
@@ -5325,6 +6007,8 @@ def build_daily_report_rows(company_id: int, start_date: str, end_date: str, mem
             if not current or str(log["logged_at"]) > str(current["logged_at"]):
                 record["logs"]["end"] = log
     for delivery in deliveries:
+        if (delivery["user_id"], delivery["work_date"]) in session_user_dates:
+            continue
         key = (delivery["user_id"], delivery["work_date"])
         record = records.setdefault(key, {"date": delivery["work_date"], "driver": delivery["driver_name"], "logs": {}, "delivery": None, "vehicle": ""})
         vehicle_text = row_value(delivery, "vehicle_name") or row_value(delivery, "vehicle_master_name") or row_value(delivery, "user_vehicle", "")
@@ -5336,15 +6020,18 @@ def build_daily_report_rows(company_id: int, start_date: str, end_date: str, mem
         start_log = record["logs"].get("start")
         end_log = record["logs"].get("end")
         delivery = record.get("delivery")
-        start_odo = int_value(row_value(end_log, "start_odometer") or row_value(start_log, "start_odometer") or row_value(start_log, "odometer"))
-        end_odo = int_value(row_value(end_log, "end_odometer") or row_value(end_log, "odometer"))
-        distance_km = int_value(row_value(end_log, "distance_km"))
+        session = record.get("session")
+        start_odo = int_value(row_value(session, "start_odometer") or row_value(end_log, "start_odometer") or row_value(start_log, "start_odometer") or row_value(start_log, "odometer"))
+        end_odo = int_value(row_value(session, "end_odometer") or row_value(end_log, "end_odometer") or row_value(end_log, "odometer"))
+        distance_km = int_value(row_value(session, "distance_km") or row_value(end_log, "distance_km"))
         if not distance_km and start_odo and end_odo:
             distance_km = max(end_odo - start_odo, 0)
         notes = []
         for log in (start_log, end_log):
             if row_value(log, "notes"):
                 notes.append(row_value(log, "notes"))
+        if row_value(session, "notes"):
+            notes.append(row_value(session, "notes"))
         if row_value(delivery, "memo"):
             notes.append(row_value(delivery, "memo"))
         rows.append(
@@ -5352,18 +6039,18 @@ def build_daily_report_rows(company_id: int, start_date: str, end_date: str, mem
                 "date": record["date"],
                 "driver": record["driver"],
                 "vehicle": record["vehicle"],
-                "start_time": row_value(start_log, "logged_at", "")[11:16] if row_value(start_log, "logged_at") else "",
-                "end_time": row_value(end_log, "logged_at", "")[11:16] if row_value(end_log, "logged_at") else "",
-                "roll_call": "実施" if start_log or end_log else "",
-                "alcohol": " / ".join([row_value(log, "alcohol_result", "") for log in (start_log, end_log) if row_value(log, "alcohol_result", "")]),
+                "start_time": (row_value(session, "start_time", "") or row_value(start_log, "logged_at", ""))[11:16] if (row_value(session, "start_time", "") or row_value(start_log, "logged_at", "")) else "",
+                "end_time": (row_value(session, "end_time", "") or row_value(end_log, "logged_at", ""))[11:16] if (row_value(session, "end_time", "") or row_value(end_log, "logged_at", "")) else "",
+                "roll_call": "実施" if session or start_log or end_log else "",
+                "alcohol": " / ".join([value for value in [row_value(session, "alcohol_check_start", ""), row_value(session, "alcohol_check_end", "")] if value]) if session else " / ".join([row_value(log, "alcohol_result", "") for log in (start_log, end_log) if row_value(log, "alcohol_result", "")]),
                 "start_odometer": start_odo or "",
                 "end_odometer": end_odo or "",
                 "distance_km": distance_km or "",
-                "completed": int_value(row_value(delivery, "completed")) if delivery else 0,
-                "transfer": int_value(row_value(delivery, "transfer")) if delivery else 0,
-                "night": int_value(row_value(delivery, "night")) if delivery else 0,
-                "pickup": int_value(row_value(delivery, "pickup")) if delivery else 0,
-                "large": int_value(row_value(delivery, "large")) if delivery else 0,
+                "completed": int_value(row_value(session, "delivery_count")) if session else (int_value(row_value(delivery, "completed")) if delivery else 0),
+                "transfer": int_value(row_value(session, "transfer_count")) if session else (int_value(row_value(delivery, "transfer")) if delivery else 0),
+                "night": int_value(row_value(session, "night_count")) if session else (int_value(row_value(delivery, "night")) if delivery else 0),
+                "pickup": int_value(row_value(session, "pickup_count")) if session else (int_value(row_value(delivery, "pickup")) if delivery else 0),
+                "large": int_value(row_value(session, "large_count")) if session else (int_value(row_value(delivery, "large")) if delivery else 0),
                 "rest_minutes": int_value(row_value(end_log, "rest_minutes") or row_value(start_log, "rest_minutes")),
                 "waiting_minutes": int_value(row_value(end_log, "waiting_minutes") or row_value(start_log, "waiting_minutes")),
                 "loading_minutes": int_value(row_value(end_log, "loading_minutes") or row_value(start_log, "loading_minutes")),
@@ -5444,12 +6131,19 @@ def admin_update_work_log(
 
 
 @app.get("/admin/safety", response_class=HTMLResponse)
-def admin_safety(request: Request, user=Depends(require_admin)):
+def admin_safety(request: Request, message: str = "", user=Depends(require_admin)):
     require_feature(user, "safety")
     company_id = company_id_for(user)
     logs = query_all("""SELECT w.*, u.name FROM work_logs w JOIN users u ON u.id=w.user_id WHERE w.company_id=? ORDER BY w.logged_at DESC LIMIT 100""", (company_id,))
     members = query_all("SELECT id, name FROM users WHERE role='member' AND company_id=? ORDER BY active DESC, name LIMIT 200", (company_id,))
     vehicles = vehicle_rows_for_company(company_id, include_inactive=True)
+    sessions = query_all(
+        """SELECT s.*, u.name FROM work_log_sessions s
+           JOIN users u ON u.id=s.user_id AND u.company_id=s.company_id
+           WHERE s.company_id=?
+           ORDER BY s.work_date DESC, s.session_no DESC, s.id DESC LIMIT 100""",
+        (company_id,),
+    )
     audit_rows = query_all(
         """SELECT a.*, u.name AS actor_name FROM audit_logs a
            LEFT JOIN users u ON u.id=a.actor_id
@@ -5460,7 +6154,7 @@ def admin_safety(request: Request, user=Depends(require_admin)):
            ORDER BY a.created_at DESC LIMIT 50""",
         (company_id,),
     )
-    return render(request, "admin_safety.html", {"logs": logs, "members": members, "vehicles": vehicles, "audit_rows": audit_rows})
+    return render(request, "admin_safety.html", {"logs": logs, "members": members, "vehicles": vehicles, "sessions": sessions, "audit_rows": audit_rows, "message": message})
 
 
 @app.get("/admin/safety/daily-report.pdf")

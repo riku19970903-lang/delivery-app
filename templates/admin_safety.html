@@ -2,6 +2,7 @@
 {% block content %}
 <h1>安全管理記録一覧</h1>
 <p class="notice">運転前後の酒気帯び確認、アルコール検知器使用、顔色・呼気・声の調子、体調、備考を一覧で確認できます。法令の最終確認は専門家に確認してください。</p>
+{% if message %}<p class="notice">{{ message }}</p>{% endif %}
 <form class="toolbar" action="/admin/safety/print" target="_blank">
   <label>対象年月<input type="month" name="ym"></label>
   <label>メンバー名
@@ -28,6 +29,56 @@
   </label>
   <button class="primary">国交省様式 日報PDF</button>
 </form>
+<section class="panel tablewrap">
+  <h2>勤務セッション一覧</h2>
+  <table>
+    <tr><th>日付</th><th>名前</th><th>回</th><th>時刻</th><th>車両</th><th>距離</th><th>個数</th><th>点呼</th><th>備考</th><th>修正</th></tr>
+    {% for s in sessions %}
+    <tr>
+      <td>{{ s.work_date }}</td>
+      <td>{{ s.name }}</td>
+      <td>{{ s.session_no }}</td>
+      <td>{{ s.start_time[11:16] if s.start_time else "--:--" }} → {{ s.end_time[11:16] if s.end_time else "未退勤" }}</td>
+      <td>{{ s.vehicle_name or s.plate_number or "-" }}</td>
+      <td>{{ s.start_odometer or 0 }} → {{ s.end_odometer or 0 }}<br><small>{{ s.distance_km or 0 }}km</small></td>
+      <td>完了 {{ s.delivery_count or 0 }} / 転送 {{ s.transfer_count or 0 }} / 夜間 {{ s.night_count or 0 }} / 集荷 {{ s.pickup_count or 0 }} / 大型 {{ s.large_count or 0 }}</td>
+      <td>出 {{ s.alcohol_check_start or "-" }} / 退 {{ s.alcohol_check_end or "-" }}</td>
+      <td>{{ s.notes }}</td>
+      <td>
+        <details class="inline-edit">
+          <summary>修正</summary>
+          <form class="mini-form stacked" method="post" action="/admin/work-sessions/{{ s.id }}/update">
+            <input type="datetime-local" name="start_time" value="{{ s.start_time[:16] if s.start_time else '' }}">
+            <input type="datetime-local" name="end_time" value="{{ s.end_time[:16] if s.end_time else '' }}">
+            <select name="vehicle_id">
+              <option value="0">車両変更なし</option>
+              {% for v in vehicles %}
+              <option value="{{ v.id }}" {% if s.vehicle_id and v.id == s.vehicle_id %}selected{% endif %}>{{ v.name }}{% if v.plate_number %} / {{ v.plate_number }}{% endif %}</option>
+              {% endfor %}
+            </select>
+            <input type="number" name="start_odometer" value="{{ s.start_odometer or 0 }}" min="0" inputmode="numeric" placeholder="開始距離">
+            <input type="number" name="end_odometer" value="{{ s.end_odometer or 0 }}" min="0" inputmode="numeric" placeholder="終了距離">
+            <input name="alcohol_check_start" value="{{ s.alcohol_check_start }}" placeholder="出勤アルコール">
+            <input name="alcohol_check_end" value="{{ s.alcohol_check_end }}" placeholder="退勤アルコール">
+            <input name="call_check_start" value="{{ s.call_check_start }}" placeholder="出勤点呼">
+            <input name="call_check_end" value="{{ s.call_check_end }}" placeholder="退勤点呼">
+            <input type="number" name="delivery_count" value="{{ s.delivery_count or 0 }}" min="0" placeholder="完了">
+            <input type="number" name="transfer_count" value="{{ s.transfer_count or 0 }}" min="0" placeholder="転送">
+            <input type="number" name="night_count" value="{{ s.night_count or 0 }}" min="0" placeholder="夜間">
+            <input type="number" name="pickup_count" value="{{ s.pickup_count or 0 }}" min="0" placeholder="集荷">
+            <input type="number" name="large_count" value="{{ s.large_count or 0 }}" min="0" placeholder="大型">
+            <input name="inspection_image_path" value="{{ s.inspection_image_path or '' }}" placeholder="点検表画像パス">
+            <textarea name="notes" placeholder="備考">{{ s.notes }}</textarea>
+            <button>セッションを修正</button>
+          </form>
+        </details>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="10">勤務セッションはまだありません。</td></tr>
+    {% endfor %}
+  </table>
+</section>
 <section class="panel tablewrap"><table><tr><th>日時</th><th>名前</th><th>区分</th><th>車両</th><th>走行距離</th><th>結果</th><th>検知器</th><th>酒気</th><th>体調</th><th>顔色</th><th>呼気</th><th>声</th><th>管理者</th><th>備考</th><th>修正</th></tr>
 {% for l in logs %}
 <tr>
