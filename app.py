@@ -38,6 +38,8 @@ if DATABASE_URL.startswith("postgres://"):
 USE_POSTGRES = bool(DATABASE_URL)
 DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "3"))
 DB_INIT_RETRY_SECONDS = int(os.getenv("DB_INIT_RETRY_SECONDS", "30"))
+SCHEMA_VERSION = "2026-05-09-startup-fast-v1"
+DB_INIT_ON_STARTUP = os.getenv("DB_INIT_ON_STARTUP", "0" if USE_POSTGRES else "1").lower() in {"1", "true", "yes", "on"}
 APP_NAME = "SPARKLE DRIVE"
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_STORAGE_KEY = (
@@ -89,6 +91,21 @@ DB_INIT_LOCK = Lock()
 DB_INIT_DONE = False
 DB_INIT_ERROR = None
 DB_INIT_LAST_ATTEMPT = 0.0
+FEATURE_CACHE = {}
+FEATURE_CACHE_TTL_SECONDS = int(os.getenv("FEATURE_CACHE_TTL_SECONDS", "30"))
+SCHEMA_REQUIRED_COLUMNS = {
+    "companies": ("id", "name", "status", "next_renewal_date"),
+    "users": ("id", "company_id", "username", "password_hash", "role", "notification_email", "member_notes"),
+    "deliveries": ("id", "company_id", "user_id", "work_date", "completed", "inspection_sheet_path"),
+    "work_logs": ("id", "company_id", "user_id", "work_date", "log_type", "start_odometer", "end_odometer", "distance_km"),
+    "work_log_sessions": ("id", "company_id", "user_id", "work_date", "session_no", "status", "start_odometer", "end_odometer", "inspection_image_path"),
+    "work_log_corrections": ("id", "company_id", "user_id", "work_date", "before_data", "after_data", "actor_id"),
+    "vehicles": ("id", "company_id", "name", "active", "last_odometer", "inspection_due"),
+    "inspection_sheets": ("id", "company_id", "user_id", "file_path", "storage_path", "retention_until"),
+    "inspection_slips": ("id", "company_id", "user_id", "file_path", "storage_path", "retention_until"),
+    "company_features": ("company_id", "feature_key", "enabled"),
+    "audit_logs": ("id", "company_id", "action", "table_name", "created_at"),
+}
 SHIFT_ALLOWED_STATUSES = {"出勤", "1便", "2便", "3便", "休み"}
 SHIFT_IMPORT_HEADERS = ["日付", "名前", "出勤区分", "配達エリア", "便", "備考"]
 SHIFT_IMPORT_LIMIT = 500
@@ -336,6 +353,49 @@ def safe_upload_name(original_name: str):
     return suffix
 
 
+def schema_table_columns(conn, table: str):
+    if USE_POSTGRES:
+        rows = conn.execute(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_schema='public' AND table_name=?""",
+            (table,),
+        ).fetchall()
+        return {row["column_name"] for row in rows}
+    rows = conn.execute(f"PRAGMA table_info({_quote_identifier(table)})").fetchall()
+    return {row["name"] for row in rows}
+
+
+def current_schema_shape_ok():
+    try:
+        with db() as conn:
+            for table, columns in SCHEMA_REQUIRED_COLUMNS.items():
+                existing = schema_table_columns(conn, table)
+                if not existing or not set(columns).issubset(existing):
+                    return False
+        return True
+    except Exception:
+        return False
+
+
+def mark_schema_initialized():
+    now = datetime.now().isoformat(timespec="seconds")
+    with db() as conn:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS app_metadata (
+                meta_key TEXT PRIMARY KEY,
+                meta_value TEXT DEFAULT '',
+                updated_at TEXT DEFAULT ''
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO app_metadata(meta_key, meta_value, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(meta_key) DO UPDATE SET meta_value=excluded.meta_value, updated_at=excluded.updated_at""",
+            ("schema_version", SCHEMA_VERSION, now),
+        )
+        conn.commit()
+
+
 def supabase_storage_enabled():
     return bool(SUPABASE_URL and SUPABASE_STORAGE_KEY and SUPABASE_STORAGE_BUCKET)
 
@@ -456,6 +516,14 @@ def inspection_image_info(path: str):
     }
 
 
+def inspection_image_info_lazy(path: str):
+    path = path or ""
+    if not path:
+        return {"image_path": "", "image_available": False, "image_missing": False, "image_view_url": "", "image_label": "画像なし"}
+    view_url = f"/inspection-file?path={quote(path, safe='')}"
+    return {"image_path": path, "image_available": True, "image_missing": False, "image_view_url": view_url, "image_label": "画像あり"}
+
+
 def with_image_info(row, path_field="file_path"):
     item = dict(row)
     item.update(inspection_image_info(item.get(path_field, "")))
@@ -464,6 +532,16 @@ def with_image_info(row, path_field="file_path"):
 
 def attach_image_info(rows, path_field="file_path"):
     return [with_image_info(row, path_field) for row in rows]
+
+
+def with_image_info_lazy(row, path_field="file_path"):
+    item = dict(row)
+    item.update(inspection_image_info_lazy(item.get(path_field, "")))
+    return item
+
+
+def attach_image_info_lazy(rows, path_field="file_path"):
+    return [with_image_info_lazy(row, path_field) for row in rows]
 
 
 def save_image_data_for_ocr(data: bytes, filename: str, content_type: str, folder: str, local_dir: Path):
@@ -603,13 +681,26 @@ def is_feature_enabled(features, key: str) -> bool:
 
 
 def load_company_features(company_id: int):
+    cache_key = int(company_id or PLATFORM_COMPANY_ID)
+    cached = FEATURE_CACHE.get(cache_key)
+    now_m = monotonic()
+    if cached and now_m - cached["at"] < FEATURE_CACHE_TTL_SECONDS:
+        return dict(cached["features"])
     enabled = {feature["key"]: True for feature in FEATURE_CATALOG}
     rows = query_all("SELECT feature_key, enabled FROM company_features WHERE company_id=?", (company_id,))
     for row in rows:
         key = row["feature_key"]
         if key in FEATURE_KEYS:
             enabled[key] = bool(row["enabled"])
+    FEATURE_CACHE[cache_key] = {"at": now_m, "features": dict(enabled)}
     return enabled
+
+
+def clear_feature_cache(company_id: Optional[int] = None):
+    if company_id is None:
+        FEATURE_CACHE.clear()
+    else:
+        FEATURE_CACHE.pop(int(company_id or PLATFORM_COMPANY_ID), None)
 
 
 def feature_price_rows():
@@ -693,6 +784,7 @@ def apply_pending_feature_changes(company_id: int):
                 (now, row["id"]),
             )
         conn.commit()
+    clear_feature_cache(company_id)
     return len(rows)
 
 
@@ -829,6 +921,11 @@ def _init_db_schema():
     with db() as conn:
         conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS app_metadata (
+                meta_key TEXT PRIMARY KEY,
+                meta_value TEXT DEFAULT '',
+                updated_at TEXT DEFAULT ''
+            );
             CREATE TABLE IF NOT EXISTS companies (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -1400,6 +1497,13 @@ def _init_db_schema():
             "CREATE INDEX IF NOT EXISTS idx_work_log_corrections_company_changed ON work_log_corrections(company_id, changed_at)",
         ):
             conn.execute(index_sql)
+        schema_now = datetime.now().isoformat(timespec="seconds")
+        conn.execute(
+            """INSERT INTO app_metadata(meta_key, meta_value, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(meta_key) DO UPDATE SET meta_value=excluded.meta_value, updated_at=excluded.updated_at""",
+            ("schema_version", SCHEMA_VERSION, schema_now),
+        )
         conn.execute("INSERT OR IGNORE INTO companies(id, name, created_at) VALUES (1, ?, ?)", ("SPARKLE DRIVE", datetime.now().isoformat(timespec="seconds")))
         conn.execute("UPDATE companies SET status='利用中' WHERE COALESCE(status, '')=''")
         seed_feature_prices(conn)
@@ -1463,6 +1567,23 @@ def _init_db_schema():
     ensure_vehicle_issue_schema()
 
 
+def schema_already_initialized():
+    if not USE_POSTGRES and not DB_PATH.exists():
+        return False
+    try:
+        with db() as conn:
+            row = conn.execute(
+                "SELECT meta_value FROM app_metadata WHERE meta_key=?",
+                ("schema_version",),
+            ).fetchone()
+        return row_value(row, "meta_value", "") == SCHEMA_VERSION
+    except Exception:
+        if current_schema_shape_ok():
+            mark_schema_initialized()
+            return True
+        return False
+
+
 def init_db():
     global DB_INIT_DONE, DB_INIT_ERROR, DB_INIT_LAST_ATTEMPT
     if DB_INIT_DONE:
@@ -1472,6 +1593,10 @@ def init_db():
             return
         DB_INIT_LAST_ATTEMPT = monotonic()
         try:
+            if schema_already_initialized():
+                DB_INIT_DONE = True
+                DB_INIT_ERROR = None
+                return
             _init_db_schema()
         except Exception as exc:
             DB_INIT_ERROR = exc
@@ -1490,9 +1615,9 @@ def safe_startup_init_db():
 
 @app.on_event("startup")
 def startup():
-    if USE_POSTGRES:
+    if USE_POSTGRES and DB_INIT_ON_STARTUP:
         Thread(target=safe_startup_init_db, daemon=True).start()
-    else:
+    elif not USE_POSTGRES:
         safe_startup_init_db()
 
 
@@ -3198,35 +3323,58 @@ def logout():
 @app.get("/admin", response_class=HTMLResponse)
 def admin_dashboard(request: Request, user=Depends(require_admin)):
     if is_platform_admin(user):
-        totals = company_feature_totals()
-        companies = query_all(
-            """SELECT c.*,
-                      (SELECT username FROM users au
-                       WHERE au.company_id=c.id AND au.role='admin' AND au.active=1
-                       ORDER BY au.id LIMIT 1) AS admin_username
-               FROM companies c
-               ORDER BY c.id DESC
-               LIMIT 200"""
-        )
         total_companies = query_one("SELECT COUNT(*) AS count FROM companies")["count"]
         active_contracts = query_one(
             "SELECT COUNT(*) AS count FROM companies WHERE active=1 AND COALESCE(status, '利用中')='利用中'"
         )["count"]
-        monthly_revenue = 0
+        monthly_revenue = int_value(row_value(query_one(
+            """SELECT COALESCE(SUM(company_total), 0) AS total
+               FROM (
+                 SELECT c.id, COALESCE(SUM(CASE WHEN cf.enabled=1 THEN fp.monthly_price ELSE 0 END), 0) AS company_total
+                 FROM companies c
+                 LEFT JOIN company_features cf ON cf.company_id=c.id
+                 LEFT JOIN feature_prices fp ON fp.feature_key=cf.feature_key AND fp.active=1
+                 WHERE c.active=1 AND COALESCE(c.status, '利用中')='利用中'
+                 GROUP BY c.id
+               ) totals"""
+        ), "total"))
+        recent_companies = query_all(
+            """SELECT c.*,
+                      (SELECT username FROM users au
+                       WHERE au.company_id=c.id AND au.role='admin' AND au.active=1
+                       ORDER BY au.id LIMIT 1) AS admin_username,
+                      COALESCE(ft.monthly_total, 0) AS monthly_total,
+                      COALESCE(ft.enabled_count, 0) AS enabled_count
+               FROM companies c
+               LEFT JOIN (
+                 SELECT cf.company_id,
+                        COALESCE(SUM(CASE WHEN cf.enabled=1 THEN fp.monthly_price ELSE 0 END), 0) AS monthly_total,
+                        COALESCE(SUM(CASE WHEN cf.enabled=1 THEN 1 ELSE 0 END), 0) AS enabled_count
+                 FROM company_features cf
+                 LEFT JOIN feature_prices fp ON fp.feature_key=cf.feature_key AND fp.active=1
+                 GROUP BY cf.company_id
+               ) ft ON ft.company_id=c.id
+               ORDER BY c.id DESC
+               LIMIT 5"""
+        )
         plan_counts = {}
-        for company in companies:
-            total = totals.get(company["id"], {"monthly_total": 0, "enabled_count": 0})
+        plan_rows = query_all(
+            """SELECT c.status, COALESCE(ft.monthly_total, 0) AS monthly_total, COALESCE(ft.enabled_count, 0) AS enabled_count
+               FROM companies c
+               LEFT JOIN (
+                 SELECT cf.company_id,
+                        COALESCE(SUM(CASE WHEN cf.enabled=1 THEN fp.monthly_price ELSE 0 END), 0) AS monthly_total,
+                        COALESCE(SUM(CASE WHEN cf.enabled=1 THEN 1 ELSE 0 END), 0) AS enabled_count
+                 FROM company_features cf
+                 LEFT JOIN feature_prices fp ON fp.feature_key=cf.feature_key AND fp.active=1
+                 GROUP BY cf.company_id
+               ) ft ON ft.company_id=c.id"""
+        )
+        for company in plan_rows:
             company_status = row_value(company, "status", "利用中") or "利用中"
-            if row_value(company, "active", 1) == 1 and company_status == "利用中":
-                monthly_revenue += total["monthly_total"]
-            plan_label = plan_label_for_company(company_status, total["enabled_count"], total["monthly_total"])
+            plan_label = plan_label_for_company(company_status, int_value(row_value(company, "enabled_count")), int_value(row_value(company, "monthly_total")))
             plan_counts[plan_label] = plan_counts.get(plan_label, 0) + 1
-        recent_companies = []
-        for company in companies[:5]:
-            item = dict(company)
-            item.update(totals.get(company["id"], {"monthly_total": 0, "enabled_count": 0}))
-            recent_companies.append(item)
-        recent_requests = attach_image_info(
+        recent_requests = attach_image_info_lazy(
             query_all(
                 """SELECT r.*, c.name AS company_name, u.name AS sender_name
                    FROM support_requests r
@@ -3282,7 +3430,7 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
            WHERE d.work_date = ? AND d.company_id=? ORDER BY u.name LIMIT 100""",
         (today_s, company_id),
     )
-    deliveries = attach_image_info(deliveries, "slip_path")
+    deliveries = attach_image_info_lazy(deliveries, "slip_path")
     mobile_delivery_status = query_all(
         """SELECT u.id, u.name,
                   MAX(CASE WHEN w.log_type='start' THEN 1 ELSE 0 END) AS has_start,
@@ -3830,6 +3978,7 @@ def update_company_features(
                     (target_company_id, feature["key"], enabled, now),
                 )
             conn.commit()
+        clear_feature_cache(target_company_id)
         message = "利用機能・プラン設定を即時更新しました"
     else:
         effective_date = row_value(company, "next_renewal_date", "") or (app_today() + timedelta(days=30)).isoformat()
@@ -3892,6 +4041,7 @@ def update_feature_prices(
                 (price, item_note, now, key),
             )
         conn.commit()
+    clear_feature_cache()
     return RedirectResponse("/admin/settings?message=" + quote("機能料金を更新しました"), status_code=303)
 
 
@@ -4451,7 +4601,7 @@ def member_home(request: Request, user=Depends(require_user)):
     next_shifts = [item for item in shifts if item["shift_date"] != today_s][:2]
     comment = auto_comment(delivery, reward, bool(today_shift))
     work_state = today_work_state(user["id"], company_id, today_s)
-    vehicles, selected_vehicle = selected_vehicle_context(user)
+    selected_vehicle = vehicle_for_user(user, company_id)
     selected_vehicle_alert = vehicle_alert(selected_vehicle)
     holiday_alert = holiday_deadline_alert(now_dt.date())
     last_odometer = latest_vehicle_odometer(company_id, row_value(selected_vehicle, "id")) or latest_odometer_for_user(user["id"], company_id)
@@ -4479,7 +4629,7 @@ def member_home(request: Request, user=Depends(require_user)):
             "holiday_alert": holiday_alert,
             "oil_change_date": row_value(selected_vehicle, "oil_change_date", "") or row_value(user, "oil_change_date", "") or "未設定",
             "vehicle_inspection_due": row_value(selected_vehicle, "inspection_due", "") or row_value(user, "vehicle_inspection_due", "") or "未設定",
-            "vehicles": vehicles,
+            "vehicles": [],
             "selected_vehicle": selected_vehicle,
             "company_notice": company_notice,
         },
