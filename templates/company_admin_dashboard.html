@@ -7,38 +7,103 @@
     <p>今日見るべきことだけをまとめています。</p>
   </div>
 
-  <div class="admin-mobile-menu">
-    {% if feature_enabled('members') %}<a href="/admin/members"><span>メ</span><b>メンバー</b></a>{% endif %}
-    {% if feature_enabled('deliveries') %}<a href="/deliveries"><span>配</span><b>配達</b></a>{% endif %}
-    {% if feature_enabled('shifts') %}<a href="/admin/shifts"><span>シ</span><b>シフト</b></a>{% endif %}
-    {% if feature_enabled('vehicle') %}<a href="/admin/vehicles"><span>車</span><b>車両</b></a>{% endif %}
-    {% if feature_enabled('safety') %}<a href="/admin/safety"><span>安</span><b>安全</b></a>{% endif %}
-    {% if feature_enabled('issues') %}<a href="/vehicle-issues"><span>不</span><b>不具合</b></a>{% endif %}
-    {% if feature_enabled('holidays') %}<a href="/holidays"><span>休</span><b>休み希望</b></a>{% endif %}
-    <a href="/support-requests"><span>要</span><b>要望</b></a>
-    <a href="/admin/settings"><span>設</span><b>設定</b></a>
-  </div>
+  <section class="admin-mobile-section admin-menu-section">
+    <h2>別メニュー</h2>
+    <div class="admin-menu-categories">
+      <details class="flow-menu-category" open>
+        <summary><span>管</span><b>管理</b></summary>
+        <div class="flow-mini-grid">
+          <a class="flow-mini-button" href="/admin"><span>ホ</span><b>ホーム</b></a>
+          {% if feature_enabled('members') %}<a class="flow-mini-button" href="/admin/members"><span>メ</span><b>メンバー管理</b></a>{% endif %}
+          <a class="flow-mini-button" href="/admin/settings"><span>設</span><b>設定</b></a>
+          <a class="flow-mini-button logout" href="/logout"><span>出</span><b>ログアウト</b></a>
+        </div>
+      </details>
+      {% if feature_enabled('shifts') or feature_enabled('holidays') %}
+      <details class="flow-menu-category">
+        <summary><span>シ</span><b>シフト</b></summary>
+        <div class="flow-mini-grid">
+          {% if feature_enabled('shifts') %}<a class="flow-mini-button" href="#today-shifts"><span>今</span><b>今日のシフト</b></a>{% endif %}
+          {% if feature_enabled('shifts') %}<a class="flow-mini-button" href="#upcoming-shifts"><span>明</span><b>明日・明後日</b></a>{% endif %}
+          {% if feature_enabled('shifts') %}<a class="flow-mini-button" href="/shifts"><span>作</span><b>シフト作成</b></a>{% endif %}
+          {% if feature_enabled('holidays') %}<a class="flow-mini-button" href="/holidays"><span>休</span><b>休み希望</b></a>{% endif %}
+        </div>
+      </details>
+      {% endif %}
+      {% if feature_enabled('deliveries') or feature_enabled('inspection') %}
+      <details class="flow-menu-category">
+        <summary><span>配</span><b>配達・実績</b></summary>
+        <div class="flow-mini-grid">
+          {% if feature_enabled('deliveries') %}<a class="flow-mini-button" href="#today-results"><span>成</span><b>本日の成績</b></a>{% endif %}
+          {% if feature_enabled('deliveries') %}<a class="flow-mini-button" href="/deliveries?day={{ today }}"><span>状</span><b>入力状況</b></a>{% endif %}
+          {% if feature_enabled('inspection') %}<a class="flow-mini-button" href="/inspection-sheets"><span>点</span><b>点検表</b></a>{% endif %}
+          <a class="flow-mini-button" href="#missing-list"><span>未</span><b>未入力一覧</b></a>
+        </div>
+      </details>
+      {% endif %}
+      {% if feature_enabled('vehicle') or feature_enabled('issues') %}
+      <details class="flow-menu-category">
+        <summary><span>車</span><b>車両</b></summary>
+        <div class="flow-mini-grid">
+          {% if feature_enabled('vehicle') %}<a class="flow-mini-button" href="/admin/vehicles"><span>情</span><b>車両情報</b></a>{% endif %}
+          {% if feature_enabled('issues') %}<a class="flow-mini-button issue" href="/vehicle-issues"><span>不</span><b>車両不具合</b></a>{% endif %}
+          {% if feature_enabled('vehicle') %}<a class="flow-mini-button" href="#other-info"><span>油</span><b>オイル交換</b></a>{% endif %}
+          {% if feature_enabled('vehicle') %}<a class="flow-mini-button" href="#other-info"><span>期</span><b>車検期限</b></a>{% endif %}
+        </div>
+      </details>
+      {% endif %}
+      <details class="flow-menu-category">
+        <summary><span>通</span><b>通知・要望</b></summary>
+        <div class="flow-mini-grid">
+          <a class="flow-mini-button" href="#priority"><span>優</span><b>優先通知</b></a>
+          {% if feature_enabled('safety') %}<a class="flow-mini-button" href="/admin/safety"><span>体</span><b>体調不良報告</b></a>{% endif %}
+          <a class="flow-mini-button" href="/support-requests"><span>要</span><b>不具合・改善要望</b></a>
+          {% if feature_enabled('issues') %}<a class="flow-mini-button issue" href="/vehicle-issues"><span>車</span><b>車両不具合</b></a>{% endif %}
+        </div>
+      </details>
+    </div>
+  </section>
+
+  {% if feature_enabled('shifts') %}
+  <section id="today-shifts" class="admin-mobile-section">
+    <h2>拠点別 今日のみんなのシフト</h2>
+    {% for depot in today_shift_depots %}
+    <div class="admin-depot-card">
+      <h3>{{ depot.name }}</h3>
+      {% for s in depot["items"] %}
+      <div class="admin-shift-row rich">
+        <b>{{ s.name }}</b>
+        <span>{{ s.area_short_text or s.area_text or "エリア未設定" }} / {{ s.status }} / {{ s.vehicle_name or s.plate_number or "車両未設定" }}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="hint">本日のシフトはまだ登録されていません。</p>
+    {% endfor %}
+  </section>
+  {% endif %}
 
   <section class="admin-mobile-section">
-    <h2>本日の出勤状況</h2>
-    <div class="admin-status-grid">
+    <h2>本日の出勤情報</h2>
+    <div class="admin-status-grid status-color-grid">
+      <div class="green"><span>出勤済</span><b>{{ mobile_work_counts.started }}</b></div>
+      <div class="{{ 'red' if mobile_work_counts.not_started else 'green' }}"><span>未出勤</span><b>{{ mobile_work_counts.not_started }}</b></div>
+      <div class="{{ 'orange' if mobile_work_counts.working else 'green' }}"><span>出勤中</span><b>{{ mobile_work_counts.working }}</b></div>
+      <div class="green"><span>退勤済</span><b>{{ mobile_work_counts.finished }}</b></div>
+      <div class="{{ 'red' if mobile_work_counts.not_finished else 'green' }}"><span>未退勤</span><b>{{ mobile_work_counts.not_finished }}</b></div>
       <div><span>対象</span><b>{{ mobile_work_counts.member_total }}</b></div>
-      <div><span>出勤済</span><b>{{ mobile_work_counts.started }}</b></div>
-      <div><span>退勤済</span><b>{{ mobile_work_counts.finished }}</b></div>
-      <div class="{{ 'warn' if mobile_work_counts.not_started else '' }}"><span>未出勤</span><b>{{ mobile_work_counts.not_started }}</b></div>
-      <div class="{{ 'warn' if mobile_work_counts.not_finished else '' }}"><span>未退勤</span><b>{{ mobile_work_counts.not_finished }}</b></div>
-      <div><span>個数入力</span><b>{{ mobile_work_counts.delivery_done }}</b></div>
     </div>
   </section>
 
   <section class="admin-mobile-section">
-    <h2>本日の勤務セッション</h2>
+    <h2>各セッション</h2>
     <div class="admin-session-list">
       {% for s in today_sessions %}
       <div class="admin-session-card {{ 'working' if s.status == 'working' else 'finished' }}">
         <b>{{ s.name }} / {{ s.session_no }}回目</b>
         <span>{{ s.start_time[11:16] if s.start_time else "--:--" }} → {{ s.end_time[11:16] if s.end_time else "未退勤" }}</span>
-        <small>{{ s.vehicle_name or s.plate_number or "車両未設定" }} / 走行 {{ s.distance_km or 0 }}km / 完了 {{ s.delivery_count or 0 }}</small>
+        <small>{{ s.vehicle_name or s.plate_number or "車両未設定" }}</small>
+        <small>距離 {{ s.start_odometer or 0 }} → {{ s.end_odometer or 0 }} / {{ "出勤中" if s.status == "working" else "退勤済" }}</small>
       </div>
       {% else %}
       <p class="hint">本日の勤務セッションはまだありません。</p>
@@ -46,139 +111,55 @@
     </div>
   </section>
 
-  <section class="admin-mobile-section">
-    <h2>未退勤セッション</h2>
-    <div class="admin-alert-list">
-      {% for s in open_sessions %}
-      <div class="admin-alert-card orange">
-        <b>{{ s.name }} / {{ s.session_no }}回目</b>
-        <span>{{ s.start_time[11:16] if s.start_time else "--:--" }} から出勤中</span>
-        <small>{{ s.vehicle_name or "車両未設定" }}</small>
-      </div>
-      {% else %}
-      <p class="hint">未退勤セッションはありません。</p>
-      {% endfor %}
-    </div>
-  </section>
-
-  <section class="admin-mobile-section">
-    <h2>メンバー別 本日合計</h2>
-    <div class="admin-delivery-cards">
-      {% for t in member_session_totals %}
-      <div class="admin-delivery-card done">
-        <div><b>{{ t.name }}</b><span>{{ t.session_count }}回 / {{ t.distance_km or 0 }}km</span></div>
-        <dl>
-          <div><dt>完了</dt><dd>{{ t.completed or 0 }}</dd></div>
-          <div><dt>転送</dt><dd>{{ t.transfer or 0 }}</dd></div>
-          <div><dt>夜間</dt><dd>{{ t.night or 0 }}</dd></div>
-          <div><dt>集荷</dt><dd>{{ t.pickup or 0 }}</dd></div>
-        </dl>
-      </div>
-      {% else %}
-      <p class="hint">本日合計はまだありません。</p>
-      {% endfor %}
-    </div>
-  </section>
-
-  <section class="admin-mobile-section">
-    <h2>車両別 本日走行距離</h2>
-    <div class="admin-alert-list">
-      {% for v in vehicle_session_totals %}
-      <div class="admin-alert-card">
-        <b>{{ v.vehicle_name }}</b>
-        <span>{{ v.session_count }}回 / {{ v.distance_km or 0 }}km</span>
-      </div>
-      {% else %}
-      <p class="hint">車両別走行距離はまだありません。</p>
-      {% endfor %}
-    </div>
-  </section>
-
   {% if feature_enabled('deliveries') %}
-  <section class="admin-mobile-section">
-    <h2>本日のみんなの配達状況</h2>
-    <div class="admin-delivery-cards">
-      {% for d in mobile_delivery_status %}
-      <div class="admin-delivery-card {{ 'done' if d.delivery_id else 'missing' }}">
-        <div>
-          <b>{{ d.name }}</b>
-          <span>{{ "入力済み" if d.delivery_id else "未入力" }}</span>
-        </div>
-        <dl>
-          <div><dt>完了</dt><dd>{{ d.completed }}</dd></div>
-          <div><dt>夜間</dt><dd>{{ d.night }}</dd></div>
-          <div><dt>集荷</dt><dd>{{ d.pickup }}</dd></div>
-          <div><dt>大型</dt><dd>{{ d.large }}</dd></div>
-        </dl>
+  <section id="today-results" class="admin-mobile-section">
+    <h2>拠点別 みんなの今日の成績</h2>
+    {% for depot in delivery_depots %}
+    <div class="admin-depot-card result">
+      <h3>{{ depot.name }}</h3>
+      {% for d in depot["items"] %}
+      <div class="admin-result-row {{ 'missing' if not d.delivery_id else '' }}">
+        <b>{{ d.name }}</b>
+        <span>完了 {{ d.completed }} / 転送 {{ d.transfer }} / 夜間 {{ d.night }} / 集荷 {{ d.pickup }} / 大型 {{ d.large }}</span>
+        <small>報酬目安 {{ "{:,}".format(d.reward_estimate) }}円</small>
       </div>
-      {% else %}
-      <p class="hint">登録メンバーがいません。</p>
       {% endfor %}
+      <div class="admin-depot-total">
+        合計 完了{{ depot["totals"].completed }} / 転送{{ depot["totals"].transfer }} / 夜間{{ depot["totals"].night }} / 集荷{{ depot["totals"].pickup }} / 大型{{ depot["totals"].large }} / {{ "{:,}".format(depot["totals"].reward) }}円
+      </div>
     </div>
+    {% else %}
+    <p class="hint">登録メンバーがいません。</p>
+    {% endfor %}
   </section>
   {% endif %}
 
-  <section class="admin-mobile-section">
+  <section id="missing-list" class="admin-mobile-section">
     <h2>未入力一覧</h2>
     <div class="admin-alert-list">
-      <div class="admin-alert-card red">
-        <b>まだ出勤していない人</b>
-        <span>{% for m in mobile_missing_status.not_started %}{{ m.name }}{% if not loop.last %}、{% endif %}{% else %}なし{% endfor %}</span>
-      </div>
-      <div class="admin-alert-card orange">
-        <b>まだ退勤していない人</b>
-        <span>{% for m in mobile_missing_status.not_finished %}{{ m.name }}{% if not loop.last %}、{% endif %}{% else %}なし{% endfor %}</span>
-      </div>
-      <div class="admin-alert-card yellow">
-        <b>個数未入力の人</b>
-        <span>{% for m in mobile_missing_status.delivery_missing %}{{ m.name }}{% if not loop.last %}、{% endif %}{% else %}なし{% endfor %}</span>
-      </div>
-      <div class="admin-alert-card yellow">
-        <b>点呼未入力の人</b>
-        <span>{% for m in mobile_missing_status.roll_call_missing %}{{ m.name }}{% if not loop.last %}、{% endif %}{% else %}なし{% endfor %}</span>
-      </div>
-      <div class="admin-alert-card yellow">
-        <b>点検表未提出の人</b>
-        <span>{% for m in mobile_missing_status.inspection_missing %}{{ m.name }}{% if not loop.last %}、{% endif %}{% else %}なし{% endfor %}</span>
-      </div>
+      <div class="admin-alert-card red"><b>出勤未入力</b><span>{% for m in mobile_missing_status.not_started %}{{ m.name }}{% if not loop.last %}、{% endif %}{% else %}なし{% endfor %}</span></div>
+      <div class="admin-alert-card red"><b>退勤未入力</b><span>{% for m in mobile_missing_status.not_finished %}{{ m.name }}{% if not loop.last %}、{% endif %}{% else %}なし{% endfor %}</span></div>
+      <div class="admin-alert-card yellow"><b>点呼未入力</b><span>{% for m in mobile_missing_status.roll_call_missing %}{{ m.name }}{% if not loop.last %}、{% endif %}{% else %}なし{% endfor %}</span></div>
+      <div class="admin-alert-card yellow"><b>配達個数未入力</b><span>{% for m in mobile_missing_status.delivery_missing %}{{ m.name }}{% if not loop.last %}、{% endif %}{% else %}なし{% endfor %}</span></div>
+      <div class="admin-alert-card yellow"><b>点検表未提出</b><span>{% for m in mobile_missing_status.inspection_missing %}{{ m.name }}{% if not loop.last %}、{% endif %}{% else %}なし{% endfor %}</span></div>
     </div>
   </section>
-
-  {% if feature_enabled('vehicle') %}
-  <section class="admin-mobile-section">
-    <h2>車両アラート</h2>
-    <div class="admin-alert-list">
-      {% for v in vehicle_alerts %}
-      <div class="admin-alert-card {{ v.alert.level }}">
-        <b>{{ v.name }}</b>
-        <span>{{ v.alert.inspection_message }}</span>
-        <span>{{ v.alert.oil_message }}</span>
-      </div>
-      {% endfor %}
-      {% for issue in open_vehicle_issues %}
-      <div class="admin-alert-card {{ 'red' if issue.severity == '高' else 'yellow' }}">
-        <b>{{ issue.vehicle_name }}</b>
-        <span>不具合報告中: {{ issue.detail }}</span>
-        <small>{{ issue.name }} / {{ issue.status }}</small>
-      </div>
-      {% endfor %}
-      {% if not vehicle_alerts and not open_vehicle_issues %}
-      <p class="hint">重要な車両アラートはありません。</p>
-      {% endif %}
-    </div>
-  </section>
-  {% endif %}
 
   {% if feature_enabled('shifts') %}
-  <section class="admin-mobile-section">
-    <h2>明日・明後日のシフト</h2>
-    {% for group in mobile_shift_days %}
+  <section id="upcoming-shifts" class="admin-mobile-section">
+    <h2>明日・明後日の拠点別シフト</h2>
+    {% for day in mobile_shift_days %}
     <div class="admin-shift-day-card">
-      <h3>{{ group.date }}</h3>
-      {% for s in group["items"] %}
-      <div class="admin-shift-row">
-        <b>{{ s.name }}</b>
-        <span>{{ s.status }}{% if s.status != "休み" and s.area_short_text %} / {{ s.area_short_text }}{% endif %}</span>
+      <h3>{{ day.date }}</h3>
+      {% for depot in day["depots"] %}
+      <div class="admin-depot-card compact">
+        <h4>{{ depot.name }}</h4>
+        {% for s in depot["items"] %}
+        <div class="admin-shift-row rich">
+          <b>{{ s.name }}</b>
+          <span>{{ s.area_short_text or s.area_text or "エリア未設定" }} / {{ s.status }} / {{ s.vehicle_name or s.plate_number or "車両未設定" }}</span>
+        </div>
+        {% endfor %}
       </div>
       {% else %}
       <p class="hint">シフト未登録です。</p>
@@ -188,7 +169,7 @@
   </section>
   {% endif %}
 
-  <section class="admin-mobile-section">
+  <section id="priority" class="admin-mobile-section">
     <h2>優先通知</h2>
     <div class="admin-alert-list">
       {% for notice in priority_notifications %}
@@ -202,31 +183,38 @@
     </div>
   </section>
 
-  <section class="admin-mobile-section">
-    <h2>修正履歴</h2>
-    <div class="admin-alert-list">
-      {% for c in session_corrections[:8] %}
-      <div class="admin-alert-card">
-        <b>{{ c.member_name }} / {{ c.work_date }}</b>
-        <span>{{ c.changed_at }} / {{ c.actor_name or c.actor_id }}</span>
-        <small>{{ c.note or c.target_table }}</small>
-      </div>
-      {% else %}
-      <p class="hint">勤務記録の修正履歴はまだありません。</p>
-      {% endfor %}
+  <section id="other-info" class="admin-mobile-section">
+    <h2>その他の情報</h2>
+    <div class="admin-mobile-summary">
+      <div><span>本日の入力</span><b>{{ mobile_work_counts.delivery_done }}件</b></div>
+      <div><span>車両アラート</span><b>{{ vehicle_alerts|length }}件</b></div>
+      <div><span>未対応要望</span><b>{{ priority_notifications|length }}件</b></div>
     </div>
-  </section>
-
-  <section class="admin-mobile-section">
-    <h2>修正が多いメンバー</h2>
     <div class="admin-alert-list">
+      {% for v in vehicle_alerts %}
+      <div class="admin-alert-card {{ v.alert.level }}">
+        <b>{{ v.name }}</b>
+        <span>{{ v.alert.inspection_message }}</span>
+        <span>{{ v.alert.oil_message }}</span>
+      </div>
+      {% endfor %}
+      {% for issue in open_vehicle_issues %}
+      <div class="admin-alert-card {{ 'red' if issue.severity == '高' else 'yellow' }}">
+        <b>{{ issue.vehicle_name }}</b>
+        <span>不具合報告中: {{ issue.detail }}</span>
+      </div>
+      {% endfor %}
+      {% for c in session_corrections[:5] %}
+      <div class="admin-alert-card">
+        <b>修正履歴: {{ c.member_name }}</b>
+        <span>{{ c.changed_at }} / {{ c.note or c.target_table }}</span>
+      </div>
+      {% endfor %}
       {% for c in frequent_corrections %}
       <div class="admin-alert-card yellow">
-        <b>{{ c.name }}</b>
+        <b>修正が多い: {{ c.name }}</b>
         <span>直近30日で {{ c.correction_count }} 件</span>
       </div>
-      {% else %}
-      <p class="hint">目立つ修正件数はありません。</p>
       {% endfor %}
     </div>
   </section>

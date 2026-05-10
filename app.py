@@ -1881,6 +1881,19 @@ def attach_shift_areas(shifts):
     return items
 
 
+def group_rows_by_depot(rows, name_key: str = "depot_name", default_name: str = "未設定拠点"):
+    grouped = []
+    index = {}
+    for row in rows:
+        item = dict(row)
+        depot_name = row_value(item, name_key, "") or default_name
+        if depot_name not in index:
+            index[depot_name] = {"name": depot_name, "items": []}
+            grouped.append(index[depot_name])
+        index[depot_name]["items"].append(item)
+    return grouped
+
+
 def parse_area_label(area_label):
     pairs = []
     for part in (area_label or "").split("・"):
@@ -3431,6 +3444,26 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
         (today_s, company_id),
     )
     deliveries = attach_image_info_lazy(deliveries, "slip_path")
+    today_shift_rows = attach_shift_areas(
+        query_all(
+            """SELECT s.*, u.name, u.vehicle AS user_vehicle,
+                      COALESCE(v.name, u.vehicle, '') AS vehicle_name,
+                      v.plate_number,
+                      COALESCE(p.name, '未設定拠点') AS depot_name,
+                      d.name AS district_name,
+                      t.name AS town_name
+               FROM shifts s
+               JOIN users u ON u.id=s.user_id AND u.company_id=s.company_id
+               LEFT JOIN vehicles v ON v.id=u.last_vehicle_id AND v.company_id=u.company_id
+               LEFT JOIN districts d ON d.id=s.district_id AND d.company_id=s.company_id
+               LEFT JOIN depots p ON p.id=d.depot_id AND p.company_id=s.company_id
+               LEFT JOIN towns t ON t.id=s.town_id AND t.company_id=s.company_id
+               WHERE s.company_id=? AND s.shift_date=? AND s.decided=1
+               ORDER BY depot_name, u.name LIMIT 200""",
+            (company_id, today_s),
+        )
+    )
+    today_shift_depots = group_rows_by_depot(today_shift_rows)
     mobile_delivery_status = query_all(
         """SELECT u.id, u.name,
                   MAX(CASE WHEN w.log_type='start' THEN 1 ELSE 0 END) AS has_start,
@@ -3487,11 +3520,62 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
     mobile_work_counts = {
         "member_total": len(mobile_delivery_status),
         "started": sum(1 for row in mobile_delivery_status if int_value(row["has_start"])),
+        "working": sum(1 for row in mobile_delivery_status if int_value(row.get("open_session_count"))),
         "finished": sum(1 for row in mobile_delivery_status if int_value(row["has_end"])),
         "not_started": len(mobile_missing_status["not_started"]),
         "not_finished": len(mobile_missing_status["not_finished"]),
         "delivery_done": sum(1 for row in mobile_delivery_status if row_value(row, "delivery_id")),
     }
+    delivery_depot_rows = query_all(
+        """SELECT u.id AS user_id, u.name,
+                  COALESCE(p.name, '未設定拠点') AS depot_name,
+                  COALESCE(d.completed, 0) AS completed,
+                  COALESCE(d.transfer, 0) AS transfer,
+                  COALESCE(d.night, 0) AS night,
+                  COALESCE(d.pickup, 0) AS pickup,
+                  COALESCE(d.large, 0) AS large,
+                  d.id AS delivery_id,
+                  COALESCE(r.delivery_unit, 0) AS delivery_unit,
+                  COALESCE(r.transfer_unit, 0) AS transfer_unit,
+                  COALESCE(r.night_unit, 0) AS night_unit,
+                  COALESCE(r.pickup_unit, 0) AS pickup_unit,
+                  COALESCE(r.large_unit, 0) AS large_unit,
+                  COALESCE(r.vehicle_rental_type, 'none') AS vehicle_rental_type,
+                  COALESCE(r.vehicle_daily_fee, 0) AS vehicle_daily_fee
+           FROM users u
+           LEFT JOIN shifts s ON s.user_id=u.id AND s.company_id=u.company_id AND s.shift_date=? AND s.decided=1
+           LEFT JOIN districts dist ON dist.id=s.district_id AND dist.company_id=s.company_id
+           LEFT JOIN depots p ON p.id=dist.depot_id AND p.company_id=s.company_id
+           LEFT JOIN deliveries d ON d.user_id=u.id AND d.company_id=u.company_id AND d.work_date=?
+           LEFT JOIN rates r ON r.user_id=u.id AND r.company_id=u.company_id
+           WHERE u.company_id=? AND u.role='member' AND u.active=1 AND COALESCE(u.purged,0)=0
+           ORDER BY depot_name, u.name LIMIT 200""",
+        (today_s, today_s, company_id),
+    )
+    delivery_depot_items = []
+    for row in delivery_depot_rows:
+        item = dict(row)
+        gross = (
+            int_value(item["completed"]) * int_value(item["delivery_unit"])
+            + int_value(item["transfer"]) * int_value(item["transfer_unit"])
+            + int_value(item["night"]) * int_value(item["night_unit"])
+            + int_value(item["pickup"]) * int_value(item["pickup_unit"])
+            + int_value(item["large"]) * int_value(item["large_unit"])
+        )
+        if item["delivery_id"] and row_value(item, "vehicle_rental_type") == "daily":
+            gross -= int_value(item["vehicle_daily_fee"])
+        item["reward_estimate"] = gross
+        delivery_depot_items.append(item)
+    delivery_depots = group_rows_by_depot(delivery_depot_items)
+    for depot in delivery_depots:
+        depot["totals"] = {
+            "completed": sum(int_value(row["completed"]) for row in depot["items"]),
+            "transfer": sum(int_value(row["transfer"]) for row in depot["items"]),
+            "night": sum(int_value(row["night"]) for row in depot["items"]),
+            "pickup": sum(int_value(row["pickup"]) for row in depot["items"]),
+            "large": sum(int_value(row["large"]) for row in depot["items"]),
+            "reward": sum(int_value(row["reward_estimate"]) for row in depot["items"]),
+        }
     today_sessions = query_all(
         """SELECT s.*, u.name, v.plate_number
            FROM work_log_sessions s
@@ -3542,19 +3626,27 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
     )
     upcoming_shifts = attach_shift_areas(
         query_all(
-            """SELECT s.*, u.name, d.name AS district_name, t.name AS town_name
+            """SELECT s.*, u.name, u.vehicle AS user_vehicle,
+                      COALESCE(v.name, u.vehicle, '') AS vehicle_name,
+                      v.plate_number,
+                      COALESCE(p.name, '未設定拠点') AS depot_name,
+                      d.name AS district_name,
+                      t.name AS town_name
                FROM shifts s
-               JOIN users u ON u.id=s.user_id
+               JOIN users u ON u.id=s.user_id AND u.company_id=s.company_id
+               LEFT JOIN vehicles v ON v.id=u.last_vehicle_id AND v.company_id=u.company_id
                LEFT JOIN districts d ON d.id=s.district_id AND d.company_id=s.company_id
+               LEFT JOIN depots p ON p.id=d.depot_id AND p.company_id=s.company_id
                LEFT JOIN towns t ON t.id=s.town_id AND t.company_id=s.company_id
                WHERE s.company_id=? AND s.shift_date BETWEEN ? AND ? AND s.decided=1
-               ORDER BY s.shift_date, u.name LIMIT 120""",
+               ORDER BY s.shift_date, depot_name, u.name LIMIT 120""",
             (company_id, tomorrow_s, day_after_s),
         )
     )
     shifts_by_mobile_day = []
     for day_s in (tomorrow_s, day_after_s):
-        shifts_by_mobile_day.append({"date": day_s, "items": [shift for shift in upcoming_shifts if shift["shift_date"] == day_s]})
+        day_items = [shift for shift in upcoming_shifts if shift["shift_date"] == day_s]
+        shifts_by_mobile_day.append({"date": day_s, "items": day_items, "depots": group_rows_by_depot(day_items)})
     vehicle_alerts = []
     for vehicle in vehicle_rows_for_company(company_id):
         info = vehicle_alert(vehicle)
@@ -3571,6 +3663,15 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
     )
     holiday_status = holiday_submission_status(company_id)
     notifications = []
+    deadline_alert = row_value(holiday_status, "deadline_alert", {}) if isinstance(holiday_status, dict) else {}
+    if deadline_alert and deadline_alert.get("message"):
+        notifications.append({"level": deadline_alert.get("level", "yellow"), "title": "休み希望締切", "body": deadline_alert["message"], "time": today_s})
+    for vehicle in vehicle_alerts[:8]:
+        alert = vehicle["alert"]
+        if alert.get("inspection_level"):
+            notifications.append({"level": alert["inspection_level"], "title": "車検期限", "body": f"{vehicle['name']} / {alert['inspection_message']}", "time": today_s})
+        if alert.get("oil_level"):
+            notifications.append({"level": alert["oil_level"], "title": "オイル交換時期", "body": f"{vehicle['name']} / {alert['oil_message']}", "time": today_s})
     health_logs = query_all(
         """SELECT w.*, u.name FROM work_logs w
            JOIN users u ON u.id=w.user_id
@@ -3615,6 +3716,8 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
             "deliveries": deliveries,
             "vehicle_alerts": vehicle_alerts[:5],
             "holiday_status": holiday_status,
+            "today_shift_depots": today_shift_depots,
+            "delivery_depots": delivery_depots,
             "mobile_delivery_status": mobile_delivery_status,
             "mobile_missing_status": mobile_missing_status,
             "mobile_work_counts": mobile_work_counts,
