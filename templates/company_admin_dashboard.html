@@ -41,6 +41,17 @@
         </div>
       </details>
       {% endif %}
+      {% if feature_enabled('rewards') %}
+      <details class="flow-menu-category">
+        <summary><span>金</span><b>お金の管理</b></summary>
+        <div class="flow-mini-grid">
+          <a class="flow-mini-button reward" href="/admin/finance"><span>収</span><b>月次収支</b></a>
+          <a class="flow-mini-button reward" href="/admin/depot-rates"><span>単</span><b>拠点単価</b></a>
+          <a class="flow-mini-button reward" href="/rewards"><span>報</span><b>報酬確認</b></a>
+          {% if feature_enabled('vehicle') %}<a class="flow-mini-button vehicle" href="/admin/vehicles"><span>費</span><b>車両費</b></a>{% endif %}
+        </div>
+      </details>
+      {% endif %}
       {% if feature_enabled('vehicle') or feature_enabled('issues') %}
       <details class="flow-menu-category">
         <summary><span>車</span><b>車両</b></summary>

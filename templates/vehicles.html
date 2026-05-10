@@ -3,54 +3,252 @@
 <h1>車両管理</h1>
 
 {% if is_admin_view %}
-<section class="panel formgrid">
-  <h2>車両を追加</h2>
-  <form method="post" action="/admin/vehicles" class="formgrid wide-field">
-    <label>車両名<input name="name" required placeholder="例: 軽バン 12-34"></label>
-    <label>ナンバー<input name="plate_number" placeholder="任意"></label>
-    <label>現在走行距離<input type="number" name="last_odometer" value="0" min="0"></label>
-    <label>前回オイル交換距離<input type="number" name="oil_change_odometer" value="0" min="0"></label>
-    <label>オイル交換日<input type="date" name="oil_change_date"></label>
-    <label>車検期限<input type="date" name="inspection_due"></label>
-    <label>タイヤメモ<input name="tire_note" placeholder="例: 前輪要確認"></label>
-    <label class="check"><input type="checkbox" name="active" value="1" checked> 利用中</label>
-    <button class="primary">保存</button>
+<section class="panel finance-actions">
+  <a class="button primary" href="/admin/finance">月次収支ダッシュボード</a>
+  <a class="button" href="/admin/depot-rates">拠点単価設定</a>
+  <a class="button" href="/admin/vehicle-rates">車両代設定</a>
+</section>
+
+<section class="panel vehicle-form-panel">
+  <h2>車両を追加・編集</h2>
+  <p class="hint">編集する場合は、下の車両カード内の「この車両を編集」を開いて保存してください。</p>
+  <form method="post" action="/admin/vehicles/detail" class="vehicle-detail-form" onsubmit="return confirm('この内容で車両情報を保存します。よろしいですか？')">
+    <section>
+      <h3>基本情報</h3>
+      <div class="formgrid">
+        <label>車両名 <input name="name" required placeholder="例：7428 / 軽バン12-34"></label>
+        <label>ナンバー <input name="plate_number" placeholder="例：練馬 480 あ 12-34"></label>
+        <label>車種 <input name="model" placeholder="例：エブリイ"></label>
+        <label>色 <input name="color" placeholder="例：白"></label>
+        <label>所属拠点
+          <select name="depot_id">
+            <option value="0">未設定</option>
+            {% for depot in depots %}<option value="{{ depot.id }}">{{ depot.name }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>主な使用者
+          <select name="primary_user_id">
+            <option value="0">未設定</option>
+            {% for member in members %}<option value="{{ member.id }}">{{ member.name }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>状態
+          <select name="vehicle_status">
+            {% for status in vehicle_statuses %}<option value="{{ status }}">{{ status }}</option>{% endfor %}
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" name="active" value="1" checked> 利用中</label>
+      </div>
+    </section>
+
+    <section>
+      <h3>走行距離・オイル交換</h3>
+      <div class="formgrid">
+        <label>現在走行距離 <input type="number" name="last_odometer" value="0" min="0" placeholder="例：54321"><small>退勤時の終了距離からも自動更新されます。</small></label>
+        <label>前回オイル交換距離 <input type="number" name="oil_change_odometer" value="0" min="0" placeholder="例：50000"></label>
+        <label>前回オイル交換日 <input type="date" name="oil_change_date"></label>
+        <label>次回交換目安距離 <input type="number" name="oil_change_interval" value="5000" min="1"><small>通常は4000〜5000km目安です。</small></label>
+        <label class="wide-field">オイル交換メモ <input name="oil_note" placeholder="例：次回はエレメントも交換"></label>
+      </div>
+    </section>
+
+    <section>
+      <h3>車検・タイヤ</h3>
+      <div class="formgrid">
+        <label>車検期限 <input type="date" name="inspection_due"></label>
+        <label>車検費用 <input type="number" name="inspection_cost" value="0" min="0"></label>
+        <label class="wide-field">車検メモ <input name="inspection_note" placeholder="例：2026年は早めに予約"></label>
+        <label>タイヤ交換日 <input type="date" name="tire_change_date"></label>
+        <label>タイヤ交換時の走行距離 <input type="number" name="tire_change_odometer" value="0" min="0"></label>
+        <label>タイヤ費用 <input type="number" name="tire_cost" value="0" min="0"></label>
+        <label class="wide-field">タイヤ状態メモ <input name="tire_status_note" placeholder="例：前輪の減り注意"></label>
+        <label class="wide-field">タイヤメモ <input name="tire_note" placeholder="例：前輪要確認"></label>
+      </div>
+    </section>
+
+    <section>
+      <h3>その他費用・メモ</h3>
+      <div class="formgrid">
+        <label>修理費 <input type="number" name="repair_cost" value="0" min="0"></label>
+        <label>部品代 <input type="number" name="parts_cost" value="0" min="0"></label>
+        <label>洗車代 <input type="number" name="car_wash_cost" value="0" min="0"></label>
+        <label>保険料 <input type="number" name="insurance_fee" value="0" min="0"></label>
+        <label>駐車場代 <input type="number" name="parking_fee" value="0" min="0"></label>
+        <label>その他車両費 <input type="number" name="other_vehicle_cost" value="0" min="0"></label>
+        <label class="wide-field">管理者メモ <textarea name="admin_memo" placeholder="例：毎月20日に空気圧確認"></textarea></label>
+        <label class="wide-field">不具合メモ <textarea name="issue_memo" placeholder="例：左スライドドアが重い"></textarea></label>
+      </div>
+    </section>
+    <button class="primary">車両を保存</button>
   </form>
 </section>
 {% endif %}
 
-<section class="panel tablewrap">
-  <h2>車両一覧</h2>
-  <table>
-    <tr><th>車両</th><th>走行距離</th><th>オイル</th><th>車検</th><th>タイヤ</th><th>状態</th>{% if is_admin_view %}<th>編集</th>{% endif %}</tr>
+<section class="panel">
+  <div class="section-head">
+    <h2>車両一覧</h2>
+    {% if is_admin_view %}
+    <form method="get" action="/admin/vehicles" class="toolbar compact-toolbar">
+      <label>対象月 <input type="month" name="month" value="{{ target_month }}"></label>
+      <button>表示</button>
+    </form>
+    {% endif %}
+  </div>
+
+  <div class="vehicle-card-grid">
     {% for v in vehicles %}
-    <tr>
-      <td><b>{{ v.name }}</b>{% if v.plate_number %}<br><span class="hint">{{ v.plate_number }}</span>{% endif %}</td>
-      <td>{{ "{:,}".format(v.last_odometer or 0) }}km</td>
-      <td><span class="vehicle-alert {{ v.alert.oil_level }}">{{ v.alert.oil_message }}</span><br><span class="hint">前回 {{ "{:,}".format(v.oil_change_odometer or 0) }}km</span></td>
-      <td><span class="vehicle-alert {{ v.alert.inspection_level }}">{{ v.alert.inspection_message }}</span></td>
-      <td>{{ v.tire_note or "未登録" }}</td>
-      <td>{{ "利用中" if v.active else "停止中" }}</td>
+    <article class="vehicle-card {{ v.alert.level }}">
+      <header>
+        <div>
+          <span class="status-pill">{{ v.vehicle_status or ("利用中" if v.active else "停止中") }}</span>
+          <h3>{{ v.name }}</h3>
+          <p>{{ v.plate_number or "ナンバー未設定" }}</p>
+        </div>
+        {% if is_admin_view %}<strong>¥{{ "{:,.0f}".format(v.month_vehicle_cost or 0) }}</strong>{% endif %}
+      </header>
+      <div class="vehicle-metrics">
+        <div><span>現在距離</span><b>{{ "{:,}".format(v.last_odometer or 0) }}km</b></div>
+        <div><span>オイル残</span><b>{{ "{:,}".format(v.oil_remaining or 0) }}km</b></div>
+        <div><span>車検</span><b>{{ v.inspection_due or "未設定" }}</b></div>
+        {% if is_admin_view %}<div><span>今月車両費</span><b>¥{{ "{:,.0f}".format(v.month_vehicle_cost or 0) }}</b></div>{% endif %}
+      </div>
+      <p><span class="vehicle-alert {{ v.alert.oil_level }}">{{ v.alert.oil_message }}</span></p>
+      <p><span class="vehicle-alert {{ v.alert.inspection_level }}">{{ v.alert.inspection_message }}</span></p>
+      {% if v.open_issue_count %}
+      <p><span class="vehicle-alert red">未対応不具合 {{ v.open_issue_count }}件</span></p>
+      {% endif %}
+      {% if is_admin_view %}<p class="hint">使用中メンバー：
+        {% for member in v.assigned_members %}{{ member.name }}{% if not loop.last %}、{% endif %}{% else %}未設定{% endfor %}
+      </p>{% endif %}
+      <p class="hint">最終更新：{{ v.updated_at or v.last_used_at or "-" }}</p>
+
       {% if is_admin_view %}
-      <td>
-        <form method="post" action="/admin/vehicles" class="mini-form vehicle-edit-form">
+      <details class="vehicle-edit-details">
+        <summary>この車両を編集</summary>
+        <form method="post" action="/admin/vehicles/detail" class="vehicle-detail-form compact" onsubmit="return confirm('この車両情報を更新します。よろしいですか？')">
           <input type="hidden" name="vehicle_id" value="{{ v.id }}">
-          <input name="name" value="{{ v.name }}" required>
-          <input name="plate_number" value="{{ v.plate_number }}">
-          <input type="number" name="last_odometer" value="{{ v.last_odometer or 0 }}" min="0">
-          <input type="number" name="oil_change_odometer" value="{{ v.oil_change_odometer or 0 }}" min="0">
-          <input type="date" name="oil_change_date" value="{{ v.oil_change_date }}">
-          <input type="date" name="inspection_due" value="{{ v.inspection_due }}">
-          <input name="tire_note" value="{{ v.tire_note }}">
-          <label class="check"><input type="checkbox" name="active" value="1" {% if v.active %}checked{% endif %}> 利用中</label>
+          <section>
+            <h4>基本情報</h4>
+            <div class="formgrid">
+              <label>車両名 <input name="name" value="{{ v.name }}" required></label>
+              <label>ナンバー <input name="plate_number" value="{{ v.plate_number }}"></label>
+              <label>車種 <input name="model" value="{{ v.model }}"></label>
+              <label>色 <input name="color" value="{{ v.color }}"></label>
+              <label>所属拠点
+                <select name="depot_id">
+                  <option value="0">未設定</option>
+                  {% for depot in depots %}<option value="{{ depot.id }}" {% if v.depot_id == depot.id %}selected{% endif %}>{{ depot.name }}</option>{% endfor %}
+                </select>
+              </label>
+              <label>主な使用者
+                <select name="primary_user_id">
+                  <option value="0">未設定</option>
+                  {% for member in members %}<option value="{{ member.id }}" {% if v.primary_user_id == member.id %}selected{% endif %}>{{ member.name }}</option>{% endfor %}
+                </select>
+              </label>
+              <label>状態
+                <select name="vehicle_status">
+                  {% for status in vehicle_statuses %}<option value="{{ status }}" {% if v.vehicle_status == status %}selected{% endif %}>{{ status }}</option>{% endfor %}
+                </select>
+              </label>
+              <label class="check"><input type="checkbox" name="active" value="1" {% if v.active %}checked{% endif %}> 利用中</label>
+            </div>
+          </section>
+          <section>
+            <h4>走行距離・オイル交換</h4>
+            <div class="formgrid">
+              <label>現在走行距離 <input type="number" name="last_odometer" value="{{ v.last_odometer or 0 }}" min="0"></label>
+              <label>前回オイル交換距離 <input type="number" name="oil_change_odometer" value="{{ v.oil_change_odometer or 0 }}" min="0"></label>
+              <label>前回オイル交換日 <input type="date" name="oil_change_date" value="{{ v.oil_change_date }}"></label>
+              <label>次回交換目安距離 <input type="number" name="oil_change_interval" value="{{ v.oil_change_interval or 5000 }}" min="1"></label>
+              <label class="wide-field">オイル交換メモ <input name="oil_note" value="{{ v.oil_note }}"></label>
+            </div>
+          </section>
+          <section>
+            <h4>車検・タイヤ</h4>
+            <div class="formgrid">
+              <label>車検期限 <input type="date" name="inspection_due" value="{{ v.inspection_due }}"></label>
+              <label>車検費用 <input type="number" name="inspection_cost" value="{{ v.inspection_cost or 0 }}" min="0"></label>
+              <label class="wide-field">車検メモ <input name="inspection_note" value="{{ v.inspection_note }}"></label>
+              <label>タイヤ交換日 <input type="date" name="tire_change_date" value="{{ v.tire_change_date }}"></label>
+              <label>タイヤ交換距離 <input type="number" name="tire_change_odometer" value="{{ v.tire_change_odometer or 0 }}" min="0"></label>
+              <label>タイヤ費用 <input type="number" name="tire_cost" value="{{ v.tire_cost or 0 }}" min="0"></label>
+              <label class="wide-field">タイヤ状態メモ <input name="tire_status_note" value="{{ v.tire_status_note }}"></label>
+              <label class="wide-field">タイヤメモ <input name="tire_note" value="{{ v.tire_note }}"></label>
+            </div>
+          </section>
+          <section>
+            <h4>その他費用・メモ</h4>
+            <div class="formgrid">
+              <label>修理費 <input type="number" name="repair_cost" value="{{ v.repair_cost or 0 }}" min="0"></label>
+              <label>部品代 <input type="number" name="parts_cost" value="{{ v.parts_cost or 0 }}" min="0"></label>
+              <label>洗車代 <input type="number" name="car_wash_cost" value="{{ v.car_wash_cost or 0 }}" min="0"></label>
+              <label>保険料 <input type="number" name="insurance_fee" value="{{ v.insurance_fee or 0 }}" min="0"></label>
+              <label>駐車場代 <input type="number" name="parking_fee" value="{{ v.parking_fee or 0 }}" min="0"></label>
+              <label>その他車両費 <input type="number" name="other_vehicle_cost" value="{{ v.other_vehicle_cost or 0 }}" min="0"></label>
+              <label class="wide-field">管理者メモ <textarea name="admin_memo">{{ v.admin_memo }}</textarea></label>
+              <label class="wide-field">不具合メモ <textarea name="issue_memo">{{ v.issue_memo }}</textarea></label>
+            </div>
+          </section>
           <button>更新</button>
         </form>
-      </td>
+      </details>
       {% endif %}
+    </article>
+    {% else %}
+    <p>車両が未登録です。</p>
+    {% endfor %}
+  </div>
+</section>
+
+{% if is_admin_view %}
+<section class="panel">
+  <h2>車両費用を入力</h2>
+  <form method="post" action="/admin/vehicle-expenses" enctype="multipart/form-data" class="formgrid" onsubmit="return confirm('この車両費を登録します。よろしいですか？')">
+    <label>日付 <input type="date" name="expense_date" value="{{ today }}" required></label>
+    <label>車両
+      <select name="vehicle_id" required>
+        {% for v in vehicles %}<option value="{{ v.id }}">{{ v.name }}{% if v.plate_number %} / {{ v.plate_number }}{% endif %}</option>{% endfor %}
+      </select>
+    </label>
+    <label>拠点
+      <select name="depot_id">
+        <option value="0">未設定</option>
+        {% for depot in depots %}<option value="{{ depot.id }}">{{ depot.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>カテゴリー
+      <select name="category">
+        {% for category in vehicle_expense_categories %}<option value="{{ category }}">{{ category }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>金額 <input type="number" step="1" min="0" name="amount" required placeholder="例：8500"></label>
+    <label>支払先 <input name="payee" placeholder="例：ガソリンスタンド"></label>
+    <label class="wide-field">メモ <input name="memo" placeholder="例：オイル交換、領収書あり"></label>
+    <label class="wide-field">領収書画像 任意 <input type="file" name="receipt" accept="image/*"></label>
+    <button class="primary">車両費を登録</button>
+  </form>
+</section>
+
+<section class="panel tablewrap">
+  <h2>今月の車両費 最新50件</h2>
+  <table>
+    <tr><th>日付</th><th>車両</th><th>拠点</th><th>カテゴリー</th><th>金額</th><th>支払先</th><th>領収書</th><th>メモ</th></tr>
+    {% for e in recent_expenses %}
+    <tr>
+      <td>{{ e.expense_date }}</td>
+      <td>{{ e.vehicle_name or "未設定" }}</td>
+      <td>{{ e.depot_name or "未設定" }}</td>
+      <td>{{ e.category }}</td>
+      <td>¥{{ "{:,.0f}".format(e.amount or 0) }}</td>
+      <td>{{ e.payee or "-" }}</td>
+      <td>{% if e.receipt_path %}<a class="mini-button" href="{{ e.receipt_path }}" target="_blank">画像</a>{% else %}なし{% endif %}</td>
+      <td>{{ e.memo or "" }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="{{ 7 if is_admin_view else 6 }}">車両が未登録です。</td></tr>
+    <tr><td colspan="8">今月の車両費は未登録です。</td></tr>
     {% endfor %}
   </table>
 </section>
+{% endif %}
 {% endblock %}

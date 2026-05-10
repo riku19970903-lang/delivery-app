@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>月次収支ダッシュボード</h1>
+
+<section class="panel finance-actions">
+  <a class="button" href="/admin/vehicles">車両管理</a>
+  <a class="button" href="/admin/depot-rates">拠点単価設定</a>
+  <a class="button" href="/rewards">報酬確認</a>
+</section>
+
+<section class="panel">
+  <form method="get" action="/admin/finance" class="toolbar compact-toolbar">
+    <label>対象月 <input type="month" name="month" value="{{ target_month }}"></label>
+    <button class="primary">表示</button>
+  </form>
+  <div class="finance-kpi-grid">
+    <div class="finance-kpi"><span>拠点からの売上</span><b>¥{{ "{:,.0f}".format(dashboard.revenue_total or 0) }}</b><small>前月比 ¥{{ "{:,.0f}".format(dashboard.revenue_mom or 0) }}</small></div>
+    <div class="finance-kpi"><span>配達完了数</span><b>{{ "{:,}".format(dashboard.delivery_count_total or 0) }}個</b><small>完了数ベース</small></div>
+    <div class="finance-kpi"><span>ドライバー報酬</span><b>¥{{ "{:,.0f}".format(dashboard.driver_reward_total or 0) }}</b><small>個人単価から概算</small></div>
+    <div class="finance-kpi"><span>車両費</span><b>¥{{ "{:,.0f}".format(dashboard.vehicle_expense_total or 0) }}</b><small>車両費入力分</small></div>
+    <div class="finance-kpi"><span>その他費用</span><b>¥{{ "{:,.0f}".format(dashboard.other_expense_total or 0) }}</b><small>会社費用入力分</small></div>
+    <div class="finance-kpi {{ 'profit-positive' if dashboard.gross_profit >= 0 else 'profit-negative' }}"><span>粗利</span><b>¥{{ "{:,.0f}".format(dashboard.gross_profit or 0) }}</b><small>粗利率 {{ "{:.1f}".format(dashboard.gross_margin or 0) }}%</small></div>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>拠点別売上</h2>
+  <div class="finance-card-grid">
+    {% for depot in dashboard.depot_rows %}
+    <article class="finance-card">
+      <h3>{{ depot.depot_name }}</h3>
+      <strong>¥{{ "{:,.0f}".format(depot.revenue or 0) }}</strong>
+      <div class="finance-mini-grid">
+        <span>完了 {{ depot.completed }}</span>
+        <span>転送 {{ depot.transfer }}</span>
+        <span>夜間 {{ depot.night }}</span>
+        <span>集荷 {{ depot.pickup }}</span>
+        <span>大型 {{ depot.large }}</span>
+      </div>
+      <p class="hint">ドライバー報酬 ¥{{ "{:,.0f}".format(depot.driver_reward or 0) }}</p>
+    </article>
+    {% else %}
+    <p>この月の配達実績がまだありません。</p>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="panel">
+  <h2>グラフ</h2>
+  <div class="finance-chart-grid">
+    <div class="finance-chart">
+      <h3>月別売上推移</h3>
+      {% for row in dashboard.trend_rows %}
+      <div class="bar-row"><span>{{ row.month }}</span><div><i style="width: {{ (row.revenue_total / dashboard.revenue_total * 100) if dashboard.revenue_total else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.revenue_total or 0) }}</b></div>
+      {% endfor %}
+    </div>
+    <div class="finance-chart">
+      <h3>月別粗利推移</h3>
+      {% for row in dashboard.trend_rows %}
+      <div class="bar-row"><span>{{ row.month }}</span><div><i class="{{ 'neg' if row.gross_profit < 0 else '' }}" style="width: {{ ((row.gross_profit if row.gross_profit > 0 else 0) / dashboard.revenue_total * 100) if dashboard.revenue_total else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.gross_profit or 0) }}</b></div>
+      {% endfor %}
+    </div>
+    <div class="finance-chart">
+      <h3>車両費カテゴリー別</h3>
+      {% for row in dashboard.vehicle_category_rows %}
+      <div class="bar-row"><span>{{ row.category }}</span><div><i style="width: {{ (row.total / dashboard.vehicle_expense_total * 100) if dashboard.vehicle_expense_total else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.total or 0) }}</b></div>
+      {% else %}<p class="hint">車両費は未登録です。</p>{% endfor %}
+    </div>
+    <div class="finance-chart">
+      <h3>車両ごとの費用ランキング</h3>
+      {% for row in dashboard.vehicle_rank_rows %}
+      <div class="bar-row"><span>{{ row.vehicle_name }}</span><div><i style="width: {{ (row.total / dashboard.vehicle_expense_total * 100) if dashboard.vehicle_expense_total else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.total or 0) }}</b></div>
+      {% else %}<p class="hint">車両費は未登録です。</p>{% endfor %}
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>会社費用を入力</h2>
+  <form method="post" action="/admin/company-expenses" enctype="multipart/form-data" class="formgrid" onsubmit="return confirm('この費用を登録します。よろしいですか？')">
+    <label>日付 <input type="date" name="expense_date" value="{{ today }}" required></label>
+    <label>拠点
+      <select name="depot_id">
+        <option value="0">未設定</option>
+        {% for depot in depots %}<option value="{{ depot.id }}">{{ depot.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>カテゴリー
+      <select name="category">
+        {% for category in company_expense_categories %}<option value="{{ category }}">{{ category }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>金額 <input type="number" step="1" min="0" name="amount" required placeholder="例：12000"></label>
+    <label>支払先 <input name="payee" placeholder="例：駐車場管理会社"></label>
+    <label class="wide-field">メモ <input name="memo" placeholder="例：5月分駐車場代"></label>
+    <label class="wide-field">領収書画像 任意 <input type="file" name="receipt" accept="image/*"></label>
+    <button class="primary">費用を登録</button>
+  </form>
+</section>
+
+<section class="panel tablewrap">
+  <h2>今月の会社費用 最新50件</h2>
+  <table>
+    <tr><th>日付</th><th>拠点</th><th>カテゴリー</th><th>金額</th><th>支払先</th><th>領収書</th><th>メモ</th></tr>
+    {% for e in dashboard.company_expense_rows %}
+    <tr>
+      <td>{{ e.expense_date }}</td>
+      <td>{{ e.depot_name or "未設定" }}</td>
+      <td>{{ e.category }}</td>
+      <td>¥{{ "{:,.0f}".format(e.amount or 0) }}</td>
+      <td>{{ e.payee or "-" }}</td>
+      <td>{% if e.receipt_path %}<a class="mini-button" href="{{ e.receipt_path }}" target="_blank">画像</a>{% else %}なし{% endif %}</td>
+      <td>{{ e.memo or "" }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7">会社費用は未登録です。</td></tr>
+    {% endfor %}
+  </table>
+</section>
+{% endblock %}

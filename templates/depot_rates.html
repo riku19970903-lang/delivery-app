@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>拠点単価設定</h1>
+
+<section class="panel finance-actions">
+  <a class="button" href="/admin/vehicles">車両管理</a>
+  <a class="button primary" href="/admin/finance">月次収支ダッシュボード</a>
+</section>
+
+<section class="panel">
+  <h2>拠点からの売上単価を追加</h2>
+  <p class="hint">月途中で単価が変わる場合も、履歴として新しい適用開始日で追加してください。既存履歴は削除しません。</p>
+  <form method="post" action="/admin/depot-rates" class="formgrid" onsubmit="return confirm('この拠点単価を追加します。よろしいですか？')">
+    <label>拠点
+      <select name="depot_id" required>
+        {% for depot in depots %}<option value="{{ depot.id }}">{{ depot.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>基本単価 <input type="number" step="0.1" min="0" name="base_unit" value="193.5" required></label>
+    <label>転送単価 <input type="number" step="0.1" min="0" name="transfer_unit" value="0"></label>
+    <label>夜間加算 <input type="number" step="0.1" min="0" name="night_unit" value="0"></label>
+    <label>集荷/引受単価 <input type="number" step="0.1" min="0" name="pickup_unit" value="0"></label>
+    <label>大型加算 <input type="number" step="0.1" min="0" name="large_unit" value="0"></label>
+    <label>適用開始日 <input type="date" name="effective_start" value="{{ today }}" required></label>
+    <label>適用終了日 <input type="date" name="effective_end"></label>
+    <label class="wide-field">メモ <input name="memo" placeholder="例：光が丘郵便局 2026年契約単価"></label>
+    <button class="primary">単価を追加</button>
+  </form>
+</section>
+
+<section class="panel tablewrap">
+  <h2>単価履歴</h2>
+  <table>
+    <tr><th>拠点</th><th>基本</th><th>転送</th><th>夜間</th><th>集荷/引受</th><th>大型</th><th>開始</th><th>終了</th><th>メモ</th></tr>
+    {% for row in rows %}
+    <tr>
+      <td>{{ row.depot_name }}</td>
+      <td>¥{{ "{:,.1f}".format(row.base_unit or 0) }}</td>
+      <td>¥{{ "{:,.1f}".format(row.transfer_unit or 0) }}</td>
+      <td>¥{{ "{:,.1f}".format(row.night_unit or 0) }}</td>
+      <td>¥{{ "{:,.1f}".format(row.pickup_unit or 0) }}</td>
+      <td>¥{{ "{:,.1f}".format(row.large_unit or 0) }}</td>
+      <td>{{ row.effective_start }}</td>
+      <td>{{ row.effective_end or "-" }}</td>
+      <td>{{ row.memo or "" }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="9">拠点単価はまだ登録されていません。</td></tr>
+    {% endfor %}
+  </table>
+</section>
+{% endblock %}

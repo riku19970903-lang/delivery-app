@@ -38,7 +38,7 @@ if DATABASE_URL.startswith("postgres://"):
 USE_POSTGRES = bool(DATABASE_URL)
 DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "3"))
 DB_INIT_RETRY_SECONDS = int(os.getenv("DB_INIT_RETRY_SECONDS", "30"))
-SCHEMA_VERSION = "2026-05-09-startup-fast-v1"
+SCHEMA_VERSION = "2026-05-10-finance-v1"
 DB_INIT_ON_STARTUP = os.getenv("DB_INIT_ON_STARTUP", "0" if USE_POSTGRES else "1").lower() in {"1", "true", "yes", "on"}
 APP_NAME = "SPARKLE DRIVE"
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -67,6 +67,7 @@ except ZoneInfoNotFoundError:
 UPLOAD_DIR = BASE_DIR / "uploads" / "inspection_sheets"
 SLIP_UPLOAD_DIR = BASE_DIR / "uploads" / "inspection_slips"
 SUPPORT_UPLOAD_DIR = BASE_DIR / "uploads" / "support_requests"
+RECEIPT_UPLOAD_DIR = BASE_DIR / "uploads" / "receipts"
 SECRET_KEY = (
     os.getenv("SECRET_KEY")
     or os.getenv("APP_SECRET_KEY")
@@ -80,6 +81,7 @@ DEFAULT_MEMBER_PASSWORD = os.getenv("DEFAULT_MEMBER_PASSWORD", "member123")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 SLIP_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 SUPPORT_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+RECEIPT_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title=APP_NAME)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
@@ -100,7 +102,10 @@ SCHEMA_REQUIRED_COLUMNS = {
     "work_logs": ("id", "company_id", "user_id", "work_date", "log_type", "start_odometer", "end_odometer", "distance_km"),
     "work_log_sessions": ("id", "company_id", "user_id", "work_date", "session_no", "status", "start_odometer", "end_odometer", "inspection_image_path"),
     "work_log_corrections": ("id", "company_id", "user_id", "work_date", "before_data", "after_data", "actor_id"),
-    "vehicles": ("id", "company_id", "name", "active", "last_odometer", "inspection_due"),
+    "vehicles": ("id", "company_id", "name", "active", "last_odometer", "inspection_due", "vehicle_status", "depot_id", "primary_user_id"),
+    "vehicle_expenses": ("id", "company_id", "vehicle_id", "expense_date", "category", "amount"),
+    "company_expenses": ("id", "company_id", "expense_date", "category", "amount"),
+    "depot_rate_settings": ("id", "company_id", "depot_id", "base_unit", "effective_start"),
     "inspection_sheets": ("id", "company_id", "user_id", "file_path", "storage_path", "retention_until"),
     "inspection_slips": ("id", "company_id", "user_id", "file_path", "storage_path", "retention_until"),
     "company_features": ("company_id", "feature_key", "enabled"),
@@ -115,6 +120,9 @@ COMPANY_STATUSES = ("利用中", "停止中", "お試し")
 SUPPORT_TYPES = ("不具合", "改善要望", "使い方相談")
 SUPPORT_URGENCIES = ("低", "中", "高", "緊急")
 SUPPORT_STATUSES = ("未対応", "対応中", "完了", "保留")
+VEHICLE_STATUSES = ("使用中", "修理中", "予備", "廃車予定")
+VEHICLE_EXPENSE_CATEGORIES = ("オイル交換", "タイヤ", "車検", "修理", "保険", "駐車場", "ガソリン", "洗車", "部品", "その他")
+COMPANY_EXPENSE_CATEGORIES = ("車両費", "人件費", "駐車場", "保険", "備品", "通信費", "交際費", "福利厚生", "その他")
 FEATURE_CATALOG = [
     {"key": "basic", "label": "基本管理", "price": 3000, "note": "課金予定"},
     {"key": "members", "label": "メンバー管理", "price": 0, "note": "テスト中"},
@@ -265,7 +273,7 @@ def _append_sql_clause(sql: str, clause: str) -> str:
 
 def _needs_returning_id(sql: str) -> bool:
     return bool(
-        re.match(r"^\s*INSERT\s+INTO\s+(users|vehicle_issues|companies|vehicles|work_logs|work_log_sessions|work_log_corrections|audit_logs)\b", sql, flags=re.IGNORECASE)
+        re.match(r"^\s*INSERT\s+INTO\s+(users|vehicle_issues|companies|vehicles|vehicle_expenses|company_expenses|depot_rate_settings|work_logs|work_log_sessions|work_log_corrections|audit_logs)\b", sql, flags=re.IGNORECASE)
         and "RETURNING" not in sql.upper()
         and "ON CONFLICT" not in sql.upper()
     )
@@ -490,6 +498,7 @@ def allowed_local_image_path(path: str):
             path.startswith("/uploads/inspection_sheets/")
             or path.startswith("/uploads/inspection_slips/")
             or path.startswith("/uploads/support_requests/")
+            or path.startswith("/uploads/receipts/")
         )
     )
 
@@ -985,9 +994,76 @@ def _init_db_schema():
                 oil_change_date TEXT DEFAULT '',
                 inspection_due TEXT DEFAULT '',
                 tire_note TEXT DEFAULT '',
+                model TEXT DEFAULT '',
+                color TEXT DEFAULT '',
+                depot_id INTEGER,
+                primary_user_id INTEGER,
+                vehicle_status TEXT DEFAULT '使用中',
+                oil_change_interval INTEGER NOT NULL DEFAULT 5000,
+                oil_note TEXT DEFAULT '',
+                inspection_cost INTEGER NOT NULL DEFAULT 0,
+                inspection_note TEXT DEFAULT '',
+                tire_change_date TEXT DEFAULT '',
+                tire_change_odometer INTEGER NOT NULL DEFAULT 0,
+                tire_cost INTEGER NOT NULL DEFAULT 0,
+                tire_status_note TEXT DEFAULT '',
+                repair_cost INTEGER NOT NULL DEFAULT 0,
+                parts_cost INTEGER NOT NULL DEFAULT 0,
+                car_wash_cost INTEGER NOT NULL DEFAULT 0,
+                insurance_fee INTEGER NOT NULL DEFAULT 0,
+                parking_fee INTEGER NOT NULL DEFAULT 0,
+                other_vehicle_cost INTEGER NOT NULL DEFAULT 0,
+                admin_memo TEXT DEFAULT '',
+                issue_memo TEXT DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT DEFAULT '',
                 UNIQUE(company_id, name),
+                FOREIGN KEY(company_id) REFERENCES companies(id)
+            );
+            CREATE TABLE IF NOT EXISTS vehicle_expenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL DEFAULT 1,
+                vehicle_id INTEGER,
+                depot_id INTEGER,
+                expense_date TEXT NOT NULL,
+                category TEXT NOT NULL,
+                amount REAL NOT NULL DEFAULT 0,
+                payee TEXT DEFAULT '',
+                memo TEXT DEFAULT '',
+                receipt_path TEXT DEFAULT '',
+                created_by INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(company_id) REFERENCES companies(id),
+                FOREIGN KEY(vehicle_id) REFERENCES vehicles(id)
+            );
+            CREATE TABLE IF NOT EXISTS company_expenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL DEFAULT 1,
+                depot_id INTEGER,
+                expense_date TEXT NOT NULL,
+                category TEXT NOT NULL,
+                amount REAL NOT NULL DEFAULT 0,
+                payee TEXT DEFAULT '',
+                memo TEXT DEFAULT '',
+                receipt_path TEXT DEFAULT '',
+                created_by INTEGER,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(company_id) REFERENCES companies(id)
+            );
+            CREATE TABLE IF NOT EXISTS depot_rate_settings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL DEFAULT 1,
+                depot_id INTEGER NOT NULL,
+                base_unit REAL NOT NULL DEFAULT 0,
+                transfer_unit REAL NOT NULL DEFAULT 0,
+                night_unit REAL NOT NULL DEFAULT 0,
+                pickup_unit REAL NOT NULL DEFAULT 0,
+                large_unit REAL NOT NULL DEFAULT 0,
+                effective_start TEXT NOT NULL,
+                effective_end TEXT DEFAULT '',
+                memo TEXT DEFAULT '',
+                created_by INTEGER,
+                created_at TEXT NOT NULL,
                 FOREIGN KEY(company_id) REFERENCES companies(id)
             );
             CREATE TABLE IF NOT EXISTS work_logs (
@@ -1415,8 +1491,62 @@ def _init_db_schema():
         ensure_column(conn, "vehicles", "oil_change_date", "TEXT DEFAULT ''")
         ensure_column(conn, "vehicles", "inspection_due", "TEXT DEFAULT ''")
         ensure_column(conn, "vehicles", "tire_note", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicles", "model", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicles", "color", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicles", "depot_id", "INTEGER")
+        ensure_column(conn, "vehicles", "primary_user_id", "INTEGER")
+        ensure_column(conn, "vehicles", "vehicle_status", "TEXT DEFAULT '使用中'")
+        ensure_column(conn, "vehicles", "oil_change_interval", "INTEGER NOT NULL DEFAULT 5000")
+        ensure_column(conn, "vehicles", "oil_note", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicles", "inspection_cost", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "vehicles", "inspection_note", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicles", "tire_change_date", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicles", "tire_change_odometer", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "vehicles", "tire_cost", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "vehicles", "tire_status_note", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicles", "repair_cost", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "vehicles", "parts_cost", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "vehicles", "car_wash_cost", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "vehicles", "insurance_fee", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "vehicles", "parking_fee", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "vehicles", "other_vehicle_cost", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "vehicles", "admin_memo", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicles", "issue_memo", "TEXT DEFAULT ''")
         ensure_column(conn, "vehicles", "created_at", "TEXT DEFAULT ''")
         ensure_column(conn, "vehicles", "updated_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicle_expenses", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "vehicle_expenses", "vehicle_id", "INTEGER")
+        ensure_column(conn, "vehicle_expenses", "depot_id", "INTEGER")
+        ensure_column(conn, "vehicle_expenses", "expense_date", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicle_expenses", "category", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicle_expenses", "amount", "REAL NOT NULL DEFAULT 0")
+        ensure_column(conn, "vehicle_expenses", "payee", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicle_expenses", "memo", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicle_expenses", "receipt_path", "TEXT DEFAULT ''")
+        ensure_column(conn, "vehicle_expenses", "created_by", "INTEGER")
+        ensure_column(conn, "vehicle_expenses", "created_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "company_expenses", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "company_expenses", "depot_id", "INTEGER")
+        ensure_column(conn, "company_expenses", "expense_date", "TEXT DEFAULT ''")
+        ensure_column(conn, "company_expenses", "category", "TEXT DEFAULT ''")
+        ensure_column(conn, "company_expenses", "amount", "REAL NOT NULL DEFAULT 0")
+        ensure_column(conn, "company_expenses", "payee", "TEXT DEFAULT ''")
+        ensure_column(conn, "company_expenses", "memo", "TEXT DEFAULT ''")
+        ensure_column(conn, "company_expenses", "receipt_path", "TEXT DEFAULT ''")
+        ensure_column(conn, "company_expenses", "created_by", "INTEGER")
+        ensure_column(conn, "company_expenses", "created_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "depot_rate_settings", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "depot_rate_settings", "depot_id", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "depot_rate_settings", "base_unit", "REAL NOT NULL DEFAULT 0")
+        ensure_column(conn, "depot_rate_settings", "transfer_unit", "REAL NOT NULL DEFAULT 0")
+        ensure_column(conn, "depot_rate_settings", "night_unit", "REAL NOT NULL DEFAULT 0")
+        ensure_column(conn, "depot_rate_settings", "pickup_unit", "REAL NOT NULL DEFAULT 0")
+        ensure_column(conn, "depot_rate_settings", "large_unit", "REAL NOT NULL DEFAULT 0")
+        ensure_column(conn, "depot_rate_settings", "effective_start", "TEXT DEFAULT ''")
+        ensure_column(conn, "depot_rate_settings", "effective_end", "TEXT DEFAULT ''")
+        ensure_column(conn, "depot_rate_settings", "memo", "TEXT DEFAULT ''")
+        ensure_column(conn, "depot_rate_settings", "created_by", "INTEGER")
+        ensure_column(conn, "depot_rate_settings", "created_at", "TEXT DEFAULT ''")
         ensure_column(conn, "delivery_corrections", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "delivery_corrections", "source", "TEXT DEFAULT ''")
         ensure_column(conn, "work_log_corrections", "company_id", "INTEGER NOT NULL DEFAULT 1")
@@ -1495,6 +1625,9 @@ def _init_db_schema():
             "CREATE INDEX IF NOT EXISTS idx_work_log_sessions_company_date_user ON work_log_sessions(company_id, work_date, user_id)",
             "CREATE INDEX IF NOT EXISTS idx_work_log_sessions_open ON work_log_sessions(company_id, work_date, status)",
             "CREATE INDEX IF NOT EXISTS idx_work_log_corrections_company_changed ON work_log_corrections(company_id, changed_at)",
+            "CREATE INDEX IF NOT EXISTS idx_vehicle_expenses_company_month ON vehicle_expenses(company_id, expense_date)",
+            "CREATE INDEX IF NOT EXISTS idx_company_expenses_company_month ON company_expenses(company_id, expense_date)",
+            "CREATE INDEX IF NOT EXISTS idx_depot_rate_settings_lookup ON depot_rate_settings(company_id, depot_id, effective_start)",
         ):
             conn.execute(index_sql)
         schema_now = datetime.now().isoformat(timespec="seconds")
@@ -1814,7 +1947,10 @@ def month_bounds(ym: Optional[str]):
     if not ym:
         base = app_today().replace(day=1)
     else:
-        base = datetime.strptime(ym, "%Y-%m").date().replace(day=1)
+        try:
+            base = datetime.strptime(ym, "%Y-%m").date().replace(day=1)
+        except ValueError:
+            base = app_today().replace(day=1)
     if base.month == 12:
         next_month = base.replace(year=base.year + 1, month=1)
     else:
@@ -2434,12 +2570,295 @@ def int_value(value, default=0):
         return default
 
 
+def money_value(value, default=0.0):
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
 def vehicle_rows_for_company(company_id: int, include_inactive: bool = False):
     condition = "" if include_inactive else " AND active=1"
     return query_all(
         f"SELECT * FROM vehicles WHERE company_id=?{condition} ORDER BY active DESC, name LIMIT 200",
         (company_id,),
     )
+
+
+async def save_receipt_upload(upload: Optional[UploadFile], company_id: int, prefix: str):
+    if not upload or not upload.filename:
+        return ""
+    content_type = upload.content_type or ""
+    if content_type and not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="領収書画像は画像ファイルを選択してください")
+    data = await upload.read()
+    if len(data) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="領収書画像は10MB以内にしてください")
+    suffix = safe_upload_name(upload.filename)
+    filename = f"company{company_id}_{prefix}_{app_now().strftime('%Y%m%d%H%M%S%f')}{suffix}"
+    public_path, _ = save_inspection_image(data, filename, content_type or "image/jpeg", "receipts", RECEIPT_UPLOAD_DIR)
+    return public_path
+
+
+def depot_rows_for_company(company_id: int):
+    return query_all("SELECT * FROM depots WHERE company_id=? AND active=1 ORDER BY name LIMIT 200", (company_id,))
+
+
+def member_rows_for_company(company_id: int):
+    return query_all(
+        """SELECT id, name, username, vehicle, last_vehicle_id
+           FROM users
+           WHERE company_id=? AND role='member' AND active=1 AND COALESCE(purged,0)=0
+           ORDER BY id LIMIT 300""",
+        (company_id,),
+    )
+
+
+def vehicle_expense_month_bounds(target_month: Optional[str] = None):
+    start, end = month_bounds(target_month)
+    return start.isoformat(), end.isoformat()
+
+
+def vehicle_dashboard_rows(company_id: int, target_month: Optional[str] = None):
+    month_start, month_end = vehicle_expense_month_bounds(target_month)
+    vehicles = []
+    issue_statuses = {"対応済", "修理済", "handled", "repaired"}
+    for vehicle in vehicle_rows_for_company(company_id, include_inactive=True):
+        item = dict(vehicle)
+        item["alert"] = vehicle_alert(vehicle)
+        item["assigned_members"] = query_all(
+            """SELECT id, name FROM users
+               WHERE company_id=? AND role='member' AND active=1 AND COALESCE(purged,0)=0
+                 AND (last_vehicle_id=? OR vehicle=?)
+               ORDER BY name LIMIT 8""",
+            (company_id, vehicle["id"], row_value(vehicle, "name", "")),
+        )
+        expense_row = query_one(
+            """SELECT COALESCE(SUM(amount), 0) AS total
+               FROM vehicle_expenses
+               WHERE company_id=? AND vehicle_id=? AND expense_date BETWEEN ? AND ?""",
+            (company_id, vehicle["id"], month_start, month_end),
+        )
+        item["month_vehicle_cost"] = money_value(row_value(expense_row, "total", 0))
+        issue_rows = query_all(
+            """SELECT id FROM vehicle_issues
+               WHERE company_id=? AND (vehicle_name=? OR vehicle_name=?)
+               ORDER BY created_at DESC LIMIT 20""",
+            (company_id, row_value(vehicle, "name", ""), row_value(vehicle, "plate_number", "")),
+        )
+        open_issue_count = 0
+        if issue_rows:
+            status_rows = query_all(
+                """SELECT status FROM vehicle_issues
+                   WHERE company_id=? AND (vehicle_name=? OR vehicle_name=?)
+                   ORDER BY created_at DESC LIMIT 20""",
+                (company_id, row_value(vehicle, "name", ""), row_value(vehicle, "plate_number", "")),
+            )
+            open_issue_count = sum(1 for row in status_rows if row_value(row, "status", "") not in issue_statuses)
+        item["open_issue_count"] = open_issue_count
+        if open_issue_count:
+            item["alert"]["level"] = "red"
+        item["oil_remaining"] = max(int_value(row_value(vehicle, "oil_change_interval", 5000), 5000) - int_value(row_value(item["alert"], "oil_km", 0)), 0)
+        item["fixed_cost_total"] = sum(
+            int_value(row_value(vehicle, key, 0))
+            for key in ("inspection_cost", "tire_cost", "repair_cost", "parts_cost", "car_wash_cost", "insurance_fee", "parking_fee", "other_vehicle_cost")
+        )
+        vehicles.append(item)
+    return vehicles
+
+
+def depot_rate_for_delivery(rate_rows, depot_id: int, work_date: str):
+    selected = None
+    for rate in rate_rows:
+        if int_value(row_value(rate, "depot_id")) != int_value(depot_id):
+            continue
+        start = row_value(rate, "effective_start", "") or ""
+        end = row_value(rate, "effective_end", "") or ""
+        if start and start > work_date:
+            continue
+        if end and end < work_date:
+            continue
+        if not selected or (row_value(rate, "effective_start", "") or "") >= (row_value(selected, "effective_start", "") or ""):
+            selected = rate
+    return selected
+
+
+def delivery_revenue_from_depot_rate(delivery, rate):
+    if not rate:
+        return 0.0
+    return (
+        int_value(row_value(delivery, "completed", 0)) * money_value(row_value(rate, "base_unit", 0))
+        + int_value(row_value(delivery, "transfer", 0)) * money_value(row_value(rate, "transfer_unit", 0))
+        + int_value(row_value(delivery, "night", 0)) * money_value(row_value(rate, "night_unit", 0))
+        + int_value(row_value(delivery, "pickup", 0)) * money_value(row_value(rate, "pickup_unit", 0))
+        + int_value(row_value(delivery, "large", 0)) * money_value(row_value(rate, "large_unit", 0))
+    )
+
+
+def finance_delivery_rows(company_id: int, start_s: str, end_s: str, limit: int = 2000):
+    return query_all(
+        """SELECT d.*, u.name AS member_name,
+                  COALESCE(dep.id, 0) AS depot_id,
+                  COALESCE(dep.name, '未設定拠点') AS depot_name,
+                  r.delivery_unit AS rate_delivery_unit,
+                  r.transfer_unit AS rate_transfer_unit,
+                  r.night_unit AS rate_night_unit,
+                  r.pickup_unit AS rate_pickup_unit,
+                  r.large_unit AS rate_large_unit,
+                  r.vehicle_rental_type AS rate_vehicle_rental_type,
+                  r.vehicle_daily_fee AS rate_vehicle_daily_fee,
+                  r.vehicle_monthly_fee AS rate_vehicle_monthly_fee
+           FROM deliveries d
+           JOIN users u ON u.id=d.user_id AND u.company_id=d.company_id
+           LEFT JOIN rates r ON r.user_id=d.user_id AND r.company_id=d.company_id
+           LEFT JOIN shifts s ON s.user_id=d.user_id AND s.company_id=d.company_id AND s.shift_date=d.work_date
+           LEFT JOIN districts dist ON dist.id=s.district_id AND dist.company_id=s.company_id
+           LEFT JOIN depots dep ON dep.id=dist.depot_id AND dep.company_id=d.company_id
+           WHERE d.company_id=? AND d.work_date BETWEEN ? AND ?
+           ORDER BY d.work_date, depot_name, u.name
+           LIMIT ?""",
+        (company_id, start_s, end_s, limit),
+    )
+
+
+def finance_rate_rows(company_id: int, start_s: str, end_s: str):
+    return query_all(
+        """SELECT rs.*, dep.name AS depot_name
+           FROM depot_rate_settings rs
+           JOIN depots dep ON dep.id=rs.depot_id AND dep.company_id=rs.company_id
+           WHERE rs.company_id=? AND rs.effective_start<=? AND (COALESCE(rs.effective_end,'')='' OR rs.effective_end>=?)
+           ORDER BY rs.depot_id, rs.effective_start DESC, rs.id DESC
+           LIMIT 500""",
+        (company_id, end_s, start_s),
+    )
+
+
+def reward_rate_dict(row):
+    return {
+        "delivery_unit": money_value(row_value(row, "rate_delivery_unit", 0)),
+        "transfer_unit": money_value(row_value(row, "rate_transfer_unit", 0)),
+        "night_unit": money_value(row_value(row, "rate_night_unit", 0)),
+        "pickup_unit": money_value(row_value(row, "rate_pickup_unit", 0)),
+        "large_unit": money_value(row_value(row, "rate_large_unit", 0)),
+        "vehicle_rental_type": row_value(row, "rate_vehicle_rental_type", "none") or "none",
+        "vehicle_daily_fee": money_value(row_value(row, "rate_vehicle_daily_fee", 0)),
+        "vehicle_monthly_fee": money_value(row_value(row, "rate_vehicle_monthly_fee", 0)),
+    }
+
+
+def finance_totals_for_period(company_id: int, start_s: str, end_s: str):
+    deliveries = finance_delivery_rows(company_id, start_s, end_s)
+    rate_rows = finance_rate_rows(company_id, start_s, end_s)
+    revenue_total = 0.0
+    driver_reward_total = 0.0
+    delivery_count_total = 0
+    monthly_vehicle_fees = {}
+    depot_totals = {}
+    for row in deliveries:
+        depot_id = int_value(row_value(row, "depot_id", 0))
+        depot_name = row_value(row, "depot_name", "") or "未設定拠点"
+        rate = depot_rate_for_delivery(rate_rows, depot_id, row_value(row, "work_date", ""))
+        revenue = delivery_revenue_from_depot_rate(row, rate)
+        reward_rates = reward_rate_dict(row)
+        gross_reward = calc_reward_gross(row, reward_rates)
+        if reward_rates["vehicle_rental_type"] == "daily":
+            gross_reward -= reward_rates["vehicle_daily_fee"]
+        elif reward_rates["vehicle_rental_type"] == "monthly":
+            monthly_vehicle_fees[int_value(row_value(row, "user_id"))] = reward_rates["vehicle_monthly_fee"]
+        reward = gross_reward
+        counts = {
+            "completed": int_value(row_value(row, "completed", 0)),
+            "transfer": int_value(row_value(row, "transfer", 0)),
+            "night": int_value(row_value(row, "night", 0)),
+            "pickup": int_value(row_value(row, "pickup", 0)),
+            "large": int_value(row_value(row, "large", 0)),
+        }
+        delivery_count_total += counts["completed"]
+        revenue_total += revenue
+        driver_reward_total += reward
+        depot = depot_totals.setdefault(
+            depot_id,
+            {"depot_id": depot_id, "depot_name": depot_name, "revenue": 0.0, "driver_reward": 0.0, "completed": 0, "transfer": 0, "night": 0, "pickup": 0, "large": 0},
+        )
+        depot["revenue"] += revenue
+        depot["driver_reward"] += reward
+        for key, value in counts.items():
+            depot[key] += value
+    driver_reward_total -= sum(monthly_vehicle_fees.values())
+    for depot in depot_totals.values():
+        depot["gross_profit_before_costs"] = depot["revenue"] - depot["driver_reward"]
+    vehicle_expense = money_value(row_value(query_one("SELECT COALESCE(SUM(amount), 0) AS total FROM vehicle_expenses WHERE company_id=? AND expense_date BETWEEN ? AND ?", (company_id, start_s, end_s)), "total", 0))
+    company_vehicle_expense = money_value(row_value(query_one("SELECT COALESCE(SUM(amount), 0) AS total FROM company_expenses WHERE company_id=? AND category=? AND expense_date BETWEEN ? AND ?", (company_id, "車両費", start_s, end_s)), "total", 0))
+    other_expense = money_value(row_value(query_one("SELECT COALESCE(SUM(amount), 0) AS total FROM company_expenses WHERE company_id=? AND category<>? AND expense_date BETWEEN ? AND ?", (company_id, "車両費", start_s, end_s)), "total", 0))
+    gross_profit = revenue_total - driver_reward_total - vehicle_expense - company_vehicle_expense - other_expense
+    margin = (gross_profit / revenue_total * 100) if revenue_total else 0.0
+    return {
+        "revenue_total": revenue_total,
+        "driver_reward_total": driver_reward_total,
+        "delivery_count_total": delivery_count_total,
+        "vehicle_expense_total": vehicle_expense + company_vehicle_expense,
+        "other_expense_total": other_expense,
+        "gross_profit": gross_profit,
+        "gross_margin": margin,
+        "depot_rows": sorted(depot_totals.values(), key=lambda item: item["depot_name"]),
+    }
+
+
+def build_finance_dashboard(company_id: int, target_month: Optional[str]):
+    start, end = month_bounds(target_month)
+    start_s, end_s = start.isoformat(), end.isoformat()
+    totals = finance_totals_for_period(company_id, start_s, end_s)
+    prev_month = (start - timedelta(days=1)).replace(day=1)
+    prev_start, prev_end = month_bounds(prev_month.strftime("%Y-%m"))
+    prev_totals = finance_totals_for_period(company_id, prev_start.isoformat(), prev_end.isoformat())
+    vehicle_category_rows = query_all(
+        """SELECT category, COALESCE(SUM(amount),0) AS total
+           FROM vehicle_expenses
+           WHERE company_id=? AND expense_date BETWEEN ? AND ?
+           GROUP BY category ORDER BY total DESC LIMIT 20""",
+        (company_id, start_s, end_s),
+    )
+    vehicle_rank_rows = query_all(
+        """SELECT COALESCE(v.name, '未設定車両') AS vehicle_name, COALESCE(SUM(e.amount),0) AS total
+           FROM vehicle_expenses e
+           LEFT JOIN vehicles v ON v.id=e.vehicle_id AND v.company_id=e.company_id
+           WHERE e.company_id=? AND e.expense_date BETWEEN ? AND ?
+           GROUP BY e.vehicle_id, v.name ORDER BY total DESC LIMIT 20""",
+        (company_id, start_s, end_s),
+    )
+    company_expense_rows = query_all(
+        """SELECT e.*, COALESCE(d.name, '未設定拠点') AS depot_name
+           FROM company_expenses e
+           LEFT JOIN depots d ON d.id=e.depot_id AND d.company_id=e.company_id
+           WHERE e.company_id=? AND e.expense_date BETWEEN ? AND ?
+           ORDER BY e.expense_date DESC, e.id DESC LIMIT 50""",
+        (company_id, start_s, end_s),
+    )
+    trend_rows = []
+    trend_base = start
+    for offset in range(5, -1, -1):
+        month = trend_base.month - offset
+        year = trend_base.year
+        while month <= 0:
+            month += 12
+            year -= 1
+        trend_start, trend_end = month_bounds(f"{year:04d}-{month:02d}")
+        trend = finance_totals_for_period(company_id, trend_start.isoformat(), trend_end.isoformat())
+        trend_rows.append({"month": trend_start.strftime("%Y-%m"), **trend})
+    return {
+        **totals,
+        "start": start,
+        "end": end,
+        "target_month": start.strftime("%Y-%m"),
+        "prev_revenue_total": prev_totals["revenue_total"],
+        "prev_gross_profit": prev_totals["gross_profit"],
+        "revenue_mom": totals["revenue_total"] - prev_totals["revenue_total"],
+        "profit_mom": totals["gross_profit"] - prev_totals["gross_profit"],
+        "vehicle_category_rows": vehicle_category_rows,
+        "vehicle_rank_rows": vehicle_rank_rows,
+        "company_expense_rows": company_expense_rows,
+        "trend_rows": trend_rows,
+    }
 
 
 def vehicle_for_user(user, company_id: Optional[int] = None):
@@ -2767,18 +3186,20 @@ def vehicle_alert(vehicle, today: Optional[date] = None):
         return {"level": "", "oil_message": "車両未登録", "inspection_message": "車検未設定", "oil_km": 0, "inspection_days": None}
     last_odometer = int_value(row_value(vehicle, "last_odometer", 0))
     oil_base = int_value(row_value(vehicle, "oil_change_odometer", 0))
+    oil_interval = int_value(row_value(vehicle, "oil_change_interval", 5000), 5000) or 5000
     oil_km = max(last_odometer - oil_base, 0) if oil_base else 0
     oil_level = ""
     if oil_base:
-        if oil_km >= 5000:
+        remaining_for_alert = oil_interval - oil_km
+        if remaining_for_alert <= 0:
             oil_level = "red"
-        elif oil_km >= 4500:
+        elif remaining_for_alert <= 250:
             oil_level = "orange"
-        elif oil_km >= 4000:
+        elif remaining_for_alert <= 500:
             oil_level = "yellow"
     if oil_base:
-        remaining = max(5000 - oil_km, 0)
-        oil_message = "オイル交換時期です" if oil_km >= 5000 else f"オイル交換まであと{remaining}kmです"
+        remaining = max(oil_interval - oil_km, 0)
+        oil_message = "オイル交換時期です" if oil_km >= oil_interval else f"オイル交換まであと{remaining}kmです"
     else:
         oil_message = "オイル交換距離未設定"
 
@@ -4543,12 +4964,32 @@ def save_vehicle_rates(daily_fee: int = Form(...), monthly_fee: int = Form(...),
 @app.get("/admin/vehicles", response_class=HTMLResponse)
 def admin_vehicles_page(request: Request, user=Depends(require_admin)):
     require_feature(user, "vehicle")
-    vehicles = []
-    for vehicle in vehicle_rows_for_company(company_id_for(user), include_inactive=True):
-        item = dict(vehicle)
-        item["alert"] = vehicle_alert(vehicle)
-        vehicles.append(item)
-    return render(request, "vehicles.html", {"vehicles": vehicles, "is_admin_view": True})
+    company_id = company_id_for(user)
+    target_month = request.query_params.get("month") or app_today().strftime("%Y-%m")
+    month_start, month_end = vehicle_expense_month_bounds(target_month)
+    recent_expenses = query_all(
+        """SELECT e.*, v.name AS vehicle_name, v.plate_number, COALESCE(d.name, '') AS depot_name
+           FROM vehicle_expenses e
+           LEFT JOIN vehicles v ON v.id=e.vehicle_id AND v.company_id=e.company_id
+           LEFT JOIN depots d ON d.id=e.depot_id AND d.company_id=e.company_id
+           WHERE e.company_id=? AND e.expense_date BETWEEN ? AND ?
+           ORDER BY e.expense_date DESC, e.id DESC LIMIT 50""",
+        (company_id, month_start, month_end),
+    )
+    return render(
+        request,
+        "vehicles.html",
+        {
+            "vehicles": vehicle_dashboard_rows(company_id, target_month),
+            "members": member_rows_for_company(company_id),
+            "depots": depot_rows_for_company(company_id),
+            "recent_expenses": recent_expenses,
+            "vehicle_statuses": VEHICLE_STATUSES,
+            "vehicle_expense_categories": VEHICLE_EXPENSE_CATEGORIES,
+            "target_month": target_month,
+            "is_admin_view": True,
+        },
+    )
 
 
 @app.post("/admin/vehicles")
@@ -4627,6 +5068,277 @@ def save_vehicle(
         after=row_to_dict(after),
     )
     return RedirectResponse("/admin/vehicles", status_code=303)
+
+
+@app.post("/admin/vehicles/detail")
+def save_vehicle_detail(
+    vehicle_id: str = Form(""),
+    name: str = Form(...),
+    plate_number: str = Form(""),
+    model: str = Form(""),
+    color: str = Form(""),
+    depot_id: int = Form(0),
+    primary_user_id: int = Form(0),
+    vehicle_status: str = Form("使用中"),
+    last_odometer: int = Form(0),
+    oil_change_odometer: int = Form(0),
+    oil_change_date: str = Form(""),
+    oil_change_interval: int = Form(5000),
+    oil_note: str = Form(""),
+    inspection_due: str = Form(""),
+    inspection_cost: int = Form(0),
+    inspection_note: str = Form(""),
+    tire_change_date: str = Form(""),
+    tire_change_odometer: int = Form(0),
+    tire_cost: int = Form(0),
+    tire_status_note: str = Form(""),
+    tire_note: str = Form(""),
+    repair_cost: int = Form(0),
+    parts_cost: int = Form(0),
+    car_wash_cost: int = Form(0),
+    insurance_fee: int = Form(0),
+    parking_fee: int = Form(0),
+    other_vehicle_cost: int = Form(0),
+    admin_memo: str = Form(""),
+    issue_memo: str = Form(""),
+    active: Optional[str] = Form(None),
+    user=Depends(require_admin),
+):
+    require_feature(user, "vehicle")
+    company_id = company_id_for(user)
+    name = name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="車両名を入力してください")
+    if depot_id and not query_one("SELECT id FROM depots WHERE id=? AND company_id=?", (depot_id, company_id)):
+        raise HTTPException(status_code=400, detail="拠点が正しくありません")
+    if primary_user_id and not query_one("SELECT id FROM users WHERE id=? AND company_id=? AND role='member'", (primary_user_id, company_id)):
+        raise HTTPException(status_code=400, detail="主な使用者が正しくありません")
+    if vehicle_status not in VEHICLE_STATUSES:
+        vehicle_status = "使用中"
+    now = app_now().isoformat(timespec="seconds")
+    active_value = 1 if active == "1" else 0
+    before = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=?", (vehicle_id, company_id)) if vehicle_id else query_one("SELECT * FROM vehicles WHERE company_id=? AND name=?", (company_id, name))
+    values = (
+        name,
+        plate_number.strip(),
+        model.strip(),
+        color.strip(),
+        depot_id or None,
+        primary_user_id or None,
+        vehicle_status,
+        max(last_odometer, 0),
+        max(oil_change_odometer, 0),
+        oil_change_date,
+        max(oil_change_interval, 1),
+        oil_note.strip(),
+        inspection_due,
+        max(inspection_cost, 0),
+        inspection_note.strip(),
+        tire_change_date,
+        max(tire_change_odometer, 0),
+        max(tire_cost, 0),
+        tire_status_note.strip(),
+        tire_note.strip(),
+        max(repair_cost, 0),
+        max(parts_cost, 0),
+        max(car_wash_cost, 0),
+        max(insurance_fee, 0),
+        max(parking_fee, 0),
+        max(other_vehicle_cost, 0),
+        admin_memo.strip(),
+        issue_memo.strip(),
+        active_value,
+        now,
+    )
+    with db() as conn:
+        if vehicle_id:
+            conn.execute(
+                """UPDATE vehicles
+                   SET name=?, plate_number=?, model=?, color=?, depot_id=?, primary_user_id=?, vehicle_status=?,
+                       last_odometer=?, oil_change_odometer=?, oil_change_date=?, oil_change_interval=?, oil_note=?,
+                       inspection_due=?, inspection_cost=?, inspection_note=?,
+                       tire_change_date=?, tire_change_odometer=?, tire_cost=?, tire_status_note=?, tire_note=?,
+                       repair_cost=?, parts_cost=?, car_wash_cost=?, insurance_fee=?, parking_fee=?, other_vehicle_cost=?,
+                       admin_memo=?, issue_memo=?, active=?, updated_at=?
+                   WHERE id=? AND company_id=?""",
+                (*values, vehicle_id, company_id),
+            )
+            record_id = vehicle_id
+        else:
+            conn.execute(
+                """INSERT INTO vehicles(company_id, name, plate_number, model, color, depot_id, primary_user_id, vehicle_status,
+                   last_odometer, oil_change_odometer, oil_change_date, oil_change_interval, oil_note,
+                   inspection_due, inspection_cost, inspection_note,
+                   tire_change_date, tire_change_odometer, tire_cost, tire_status_note, tire_note,
+                   repair_cost, parts_cost, car_wash_cost, insurance_fee, parking_fee, other_vehicle_cost,
+                   admin_memo, issue_memo, active, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(company_id, name) DO UPDATE SET plate_number=excluded.plate_number,
+                   model=excluded.model, color=excluded.color, depot_id=excluded.depot_id, primary_user_id=excluded.primary_user_id,
+                   vehicle_status=excluded.vehicle_status, last_odometer=excluded.last_odometer,
+                   oil_change_odometer=excluded.oil_change_odometer, oil_change_date=excluded.oil_change_date,
+                   oil_change_interval=excluded.oil_change_interval, oil_note=excluded.oil_note,
+                   inspection_due=excluded.inspection_due, inspection_cost=excluded.inspection_cost, inspection_note=excluded.inspection_note,
+                   tire_change_date=excluded.tire_change_date, tire_change_odometer=excluded.tire_change_odometer,
+                   tire_cost=excluded.tire_cost, tire_status_note=excluded.tire_status_note, tire_note=excluded.tire_note,
+                   repair_cost=excluded.repair_cost, parts_cost=excluded.parts_cost, car_wash_cost=excluded.car_wash_cost,
+                   insurance_fee=excluded.insurance_fee, parking_fee=excluded.parking_fee, other_vehicle_cost=excluded.other_vehicle_cost,
+                   admin_memo=excluded.admin_memo, issue_memo=excluded.issue_memo, active=excluded.active, updated_at=excluded.updated_at""",
+                (company_id, *values[:-1], now, now),
+            )
+            saved = conn.execute("SELECT id FROM vehicles WHERE company_id=? AND name=?", (company_id, name)).fetchone()
+            record_id = row_value(saved, "id", "")
+        after = conn.execute("SELECT * FROM vehicles WHERE id=? AND company_id=?", (record_id, company_id)).fetchone() if record_id else None
+        audit_log(company_id, user, "vehicle.detail_update" if before else "vehicle.detail_create", "vehicles", record_id, "Vehicle detail saved", before=row_to_dict(before), after=row_to_dict(after), conn=conn)
+        conn.commit()
+    return RedirectResponse("/admin/vehicles", status_code=303)
+
+
+@app.post("/admin/vehicle-expenses")
+async def save_vehicle_expense(
+    expense_date: str = Form(...),
+    vehicle_id: int = Form(...),
+    depot_id: int = Form(0),
+    category: str = Form(...),
+    amount: float = Form(...),
+    payee: str = Form(""),
+    memo: str = Form(""),
+    receipt: Optional[UploadFile] = File(None),
+    user=Depends(require_admin),
+):
+    require_feature(user, "vehicle")
+    company_id = company_id_for(user)
+    if not parse_iso_date(expense_date):
+        raise HTTPException(status_code=400, detail="日付が正しくありません")
+    vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=?", (vehicle_id, company_id))
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="車両が見つかりません")
+    if depot_id and not query_one("SELECT id FROM depots WHERE id=? AND company_id=?", (depot_id, company_id)):
+        raise HTTPException(status_code=400, detail="拠点が正しくありません")
+    if category not in VEHICLE_EXPENSE_CATEGORIES:
+        category = "その他"
+    receipt_path = await save_receipt_upload(receipt, company_id, "vehicle_expense")
+    now = app_now().isoformat(timespec="seconds")
+    with db() as conn:
+        cur = conn.execute(
+            """INSERT INTO vehicle_expenses(company_id, vehicle_id, depot_id, expense_date, category, amount, payee, memo, receipt_path, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (company_id, vehicle_id, depot_id or None, expense_date, category, max(float(amount), 0.0), payee.strip(), memo.strip(), receipt_path, user["id"], now),
+        )
+        record_id = cur.lastrowid
+        after = conn.execute("SELECT * FROM vehicle_expenses WHERE id=? AND company_id=?", (record_id, company_id)).fetchone()
+        audit_log(company_id, user, "vehicle.expense_create", "vehicle_expenses", record_id, "Vehicle expense saved", after=row_to_dict(after), conn=conn)
+        conn.commit()
+    return RedirectResponse("/admin/vehicles", status_code=303)
+
+
+@app.get("/admin/depot-rates", response_class=HTMLResponse)
+def depot_rates_page(request: Request, user=Depends(require_admin)):
+    require_feature(user, "rewards")
+    company_id = company_id_for(user)
+    rows = query_all(
+        """SELECT rs.*, dep.name AS depot_name
+           FROM depot_rate_settings rs
+           JOIN depots dep ON dep.id=rs.depot_id AND dep.company_id=rs.company_id
+           WHERE rs.company_id=?
+           ORDER BY dep.name, rs.effective_start DESC, rs.id DESC LIMIT 300""",
+        (company_id,),
+    )
+    return render(
+        request,
+        "depot_rates.html",
+        {
+            "depots": depot_rows_for_company(company_id),
+            "rows": rows,
+        },
+    )
+
+
+@app.post("/admin/depot-rates")
+def save_depot_rate(
+    depot_id: int = Form(...),
+    base_unit: float = Form(0),
+    transfer_unit: float = Form(0),
+    night_unit: float = Form(0),
+    pickup_unit: float = Form(0),
+    large_unit: float = Form(0),
+    effective_start: str = Form(...),
+    effective_end: str = Form(""),
+    memo: str = Form(""),
+    user=Depends(require_admin),
+):
+    require_feature(user, "rewards")
+    company_id = company_id_for(user)
+    if not query_one("SELECT id FROM depots WHERE id=? AND company_id=?", (depot_id, company_id)):
+        raise HTTPException(status_code=404, detail="拠点が見つかりません")
+    if not parse_iso_date(effective_start):
+        raise HTTPException(status_code=400, detail="適用開始日が正しくありません")
+    if effective_end and not parse_iso_date(effective_end):
+        raise HTTPException(status_code=400, detail="適用終了日が正しくありません")
+    now = app_now().isoformat(timespec="seconds")
+    with db() as conn:
+        cur = conn.execute(
+            """INSERT INTO depot_rate_settings(company_id, depot_id, base_unit, transfer_unit, night_unit, pickup_unit, large_unit, effective_start, effective_end, memo, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (company_id, depot_id, max(float(base_unit), 0.0), max(float(transfer_unit), 0.0), max(float(night_unit), 0.0), max(float(pickup_unit), 0.0), max(float(large_unit), 0.0), effective_start, effective_end, memo.strip(), user["id"], now),
+        )
+        record_id = cur.lastrowid
+        after = conn.execute("SELECT * FROM depot_rate_settings WHERE id=? AND company_id=?", (record_id, company_id)).fetchone()
+        audit_log(company_id, user, "finance.depot_rate_create", "depot_rate_settings", record_id, "Depot revenue rate saved", after=row_to_dict(after), conn=conn)
+        conn.commit()
+    return RedirectResponse("/admin/depot-rates", status_code=303)
+
+
+@app.get("/admin/finance", response_class=HTMLResponse)
+def finance_dashboard_page(request: Request, user=Depends(require_admin)):
+    require_feature(user, "rewards")
+    company_id = company_id_for(user)
+    target_month = request.query_params.get("month") or app_today().strftime("%Y-%m")
+    dashboard = build_finance_dashboard(company_id, target_month)
+    return render(
+        request,
+        "finance_dashboard.html",
+        {
+            "dashboard": dashboard,
+            "depots": depot_rows_for_company(company_id),
+            "company_expense_categories": COMPANY_EXPENSE_CATEGORIES,
+            "target_month": dashboard["target_month"],
+        },
+    )
+
+
+@app.post("/admin/company-expenses")
+async def save_company_expense(
+    expense_date: str = Form(...),
+    depot_id: int = Form(0),
+    category: str = Form(...),
+    amount: float = Form(...),
+    payee: str = Form(""),
+    memo: str = Form(""),
+    receipt: Optional[UploadFile] = File(None),
+    user=Depends(require_admin),
+):
+    require_feature(user, "rewards")
+    company_id = company_id_for(user)
+    if not parse_iso_date(expense_date):
+        raise HTTPException(status_code=400, detail="日付が正しくありません")
+    if depot_id and not query_one("SELECT id FROM depots WHERE id=? AND company_id=?", (depot_id, company_id)):
+        raise HTTPException(status_code=400, detail="拠点が正しくありません")
+    if category not in COMPANY_EXPENSE_CATEGORIES:
+        category = "その他"
+    receipt_path = await save_receipt_upload(receipt, company_id, "company_expense")
+    now = app_now().isoformat(timespec="seconds")
+    with db() as conn:
+        cur = conn.execute(
+            """INSERT INTO company_expenses(company_id, depot_id, expense_date, category, amount, payee, memo, receipt_path, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (company_id, depot_id or None, expense_date, category, max(float(amount), 0.0), payee.strip(), memo.strip(), receipt_path, user["id"], now),
+        )
+        record_id = cur.lastrowid
+        after = conn.execute("SELECT * FROM company_expenses WHERE id=? AND company_id=?", (record_id, company_id)).fetchone()
+        audit_log(company_id, user, "finance.company_expense_create", "company_expenses", record_id, "Company expense saved", after=row_to_dict(after), conn=conn)
+        conn.commit()
+    return RedirectResponse("/admin/finance", status_code=303)
 
 
 @app.get("/vehicles", response_class=HTMLResponse)
