@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="flow-shell results-page">
+  <div class="flow-page-head">
+    <p class="flow-eyebrow">月間実績</p>
+    <h1>実績カレンダー</h1>
+    <p class="hint">日付を押すと、その日の出勤・退勤、配達個数、点検表、報酬目安を確認できます。</p>
+  </div>
+
+  <section class="panel">
+    <form method="get" action="/member/results" class="toolbar compact-toolbar">
+      <label>対象月 <input type="month" name="month" value="{{ calendar_data.target_month }}"></label>
+      <button class="primary">表示</button>
+    </form>
+  </section>
+
+  <section class="results-calendar">
+    <div class="results-week-head">
+      <span>日</span><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span>土</span>
+    </div>
+    {% for week in calendar_data.weeks %}
+    <div class="results-week">
+      {% for cell in week %}
+      <a class="results-day-card {% if not cell.current_month %}muted{% endif %} {% if cell.is_today %}today{% endif %} {% if cell.delivery or cell.has_work %}has-data{% endif %}" href="/member/results/{{ cell.date }}">
+        <span class="day-number">{{ cell.day }}日</span>
+        {% if cell.delivery %}
+        <b>完了 {{ cell.delivery.completed or 0 }}</b>
+        <small>転送 {{ cell.delivery.transfer or 0 }} / 夜間 {{ cell.delivery.night or 0 }}</small>
+        <small>集荷 {{ cell.delivery.pickup or 0 }} / 大型 {{ cell.delivery.large or 0 }}</small>
+        <strong>{{ "{:,}".format(cell.reward or 0) }}円</strong>
+        {% else %}
+        <small>配達未入力</small>
+        {% endif %}
+        {% if cell.has_work %}
+        <em class="{{ 'done' if cell.finished else 'warn' }}">{{ "退勤済み" if cell.finished else "未退勤" }}</em>
+        {% else %}
+        <em>出勤なし</em>
+        {% endif %}
+      </a>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </section>
+
+  <section class="flow-mini-panel">
+    <div class="flow-mini-grid">
+      <a class="flow-mini-button" href="/member"><span>ホ</span><b>ホーム</b></a>
+      <a class="flow-mini-button reward" href="/rewards"><span>報</span><b>報酬</b></a>
+      <a class="flow-mini-button reward" href="/member/result-corrections"><span>履</span><b>修正履歴</b></a>
+    </div>
+  </section>
+</section>
+{% endblock %}

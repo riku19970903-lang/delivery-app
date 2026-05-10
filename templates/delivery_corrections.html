@@ -24,4 +24,21 @@
     {% endfor %}
   </table>
 </section>
+<section class="panel tablewrap">
+  <h2>削除済みデータ</h2>
+  <table>
+    <tr><th>削除日時</th><th>メンバー</th><th>削除者</th><th>対象日</th><th>理由</th></tr>
+    {% for d in deletions %}
+    <tr>
+      <td>{{ d.deleted_at }}</td>
+      <td>{{ d.member_name }}</td>
+      <td>{{ d.actor_name or "-" }}</td>
+      <td>{{ d.work_date }}</td>
+      <td>{{ d.reason }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5">削除済みデータはありません。</td></tr>
+    {% endfor %}
+  </table>
+</section>
 {% endblock %}

@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="flow-shell results-page">
+  <div class="flow-page-head">
+    <p class="flow-eyebrow">業務履歴</p>
+    <h1>修正履歴</h1>
+    <p class="hint">自分の配達個数修正と、論理削除された出勤データの履歴を確認できます。</p>
+  </div>
+
+  <section class="flow-card tablewrap compact-table">
+    <h2>配達個数の修正</h2>
+    <table>
+      <tr><th>日時</th><th>対象日</th><th>修正前</th><th>修正後</th><th>経路</th></tr>
+      {% for c in corrections %}
+      <tr>
+        <td>{{ c.changed_at }}</td>
+        <td><a href="/member/results/{{ c.work_date }}">{{ c.work_date }}</a></td>
+        <td>完了{{ c.before_completed }} / 転送{{ c.before_transfer }} / 夜間{{ c.before_night }} / 集荷{{ c.before_pickup }} / 大型{{ c.before_large }}</td>
+        <td>完了{{ c.after_completed }} / 転送{{ c.after_transfer }} / 夜間{{ c.after_night }} / 集荷{{ c.after_pickup }} / 大型{{ c.after_large }}</td>
+        <td>{{ c.source }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5">配達個数の修正履歴はありません。</td></tr>
+      {% endfor %}
+    </table>
+  </section>
+
+  <section class="flow-card tablewrap compact-table">
+    <h2>削除済みデータ</h2>
+    <table>
+      <tr><th>削除日時</th><th>対象日</th><th>削除者</th><th>理由</th></tr>
+      {% for d in deletions %}
+      <tr>
+        <td>{{ d.deleted_at }}</td>
+        <td>{{ d.work_date }}</td>
+        <td>{{ d.actor_name or "本人" }}</td>
+        <td>{{ d.reason }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4">削除済みデータはありません。</td></tr>
+      {% endfor %}
+    </table>
+  </section>
+
+  <section class="flow-mini-panel">
+    <div class="flow-mini-grid">
+      <a class="flow-mini-button" href="/member/results"><span>実</span><b>実績カレンダー</b></a>
+      <a class="flow-mini-button" href="/member"><span>ホ</span><b>ホーム</b></a>
+    </div>
+  </section>
+</section>
+{% endblock %}

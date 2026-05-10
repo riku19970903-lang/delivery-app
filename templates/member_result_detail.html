@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="flow-shell results-page">
+  <div class="flow-page-head">
+    <p class="flow-eyebrow">日別実績</p>
+    <h1>{{ target }} の詳細</h1>
+    <p class="hint">出勤セッション、配達個数、点検表、報酬目安を確認できます。修正や削除は履歴に残ります。</p>
+  </div>
+
+  {% if message %}<p class="success">{{ message }}</p>{% endif %}
+  {% if error %}<p class="alert">{{ error }}</p>{% endif %}
+
+  <section class="flow-summary-grid result-summary-grid">
+    <div class="flow-summary-card emphasis">
+      <span>今日の報酬目安</span>
+      <b>{{ "{:,}".format(reward or 0) }}円</b>
+    </div>
+    <div class="flow-summary-card">
+      <span>配達完了</span>
+      <b>{{ delivery.completed if delivery else 0 }}個</b>
+    </div>
+    <div class="flow-summary-card">
+      <span>勤務セッション</span>
+      <b>{{ sessions|length }}回</b>
+    </div>
+  </section>
+
+  <section class="flow-card">
+    <h2>出勤セッション</h2>
+    <div class="result-session-list">
+      {% for s in sessions %}
+      <article class="result-session-card {{ s.status or '' }}">
+        <header>
+          <b>{{ s.session_no or loop.index }}回目</b>
+          <span>{{ s.start_time or "-" }} 〜 {{ s.end_time or "未退勤" }}</span>
+        </header>
+        <dl class="result-detail-grid">
+          <div><dt>車両</dt><dd>{{ s.vehicle_name or s.plate_number or "未設定" }}</dd></div>
+          <div><dt>開始距離</dt><dd>{{ s.start_odometer or 0 }}km</dd></div>
+          <div><dt>終了距離</dt><dd>{{ s.end_odometer or 0 }}km</dd></div>
+          <div><dt>走行距離</dt><dd>{{ s.distance_km or 0 }}km</dd></div>
+          <div><dt>出勤点呼</dt><dd>{{ s.call_check_start or "-" }}</dd></div>
+          <div><dt>退勤点呼</dt><dd>{{ s.call_check_end or "-" }}</dd></div>
+          <div><dt>出勤アルコール</dt><dd>{{ s.alcohol_check_start or "-" }}</dd></div>
+          <div><dt>退勤アルコール</dt><dd>{{ s.alcohol_check_end or "-" }}</dd></div>
+        </dl>
+        <p class="hint">完了 {{ s.delivery_count or 0 }} / 転送 {{ s.transfer_count or 0 }} / 夜間 {{ s.night_count or 0 }} / 集荷 {{ s.pickup_count or 0 }} / 大型 {{ s.large_count or 0 }}</p>
+        {% if s.notes %}<p>{{ s.notes }}</p>{% endif %}
+      </article>
+      {% else %}
+      <p class="hint">この日の勤務セッションはありません。</p>
+      {% endfor %}
+    </div>
+  </section>
+
+  {% if not sessions and logs %}
+  <section class="flow-card">
+    <h2>旧出退勤ログ</h2>
+    <div class="result-session-list">
+      {% for log in logs %}
+      <article class="result-session-card">
+        <header>
+          <b>{{ "出勤" if log.log_type == "start" else "退勤" }}</b>
+          <span>{{ log.logged_at }}</span>
+        </header>
+        <dl class="result-detail-grid">
+          <div><dt>車両</dt><dd>{{ log.vehicle_name or "未設定" }}</dd></div>
+          <div><dt>走行距離</dt><dd>{{ log.odometer or log.start_odometer or log.end_odometer or 0 }}km</dd></div>
+          <div><dt>アルコール</dt><dd>{{ log.alcohol_result or "-" }}</dd></div>
+          <div><dt>点呼</dt><dd>{{ log.health_status or log.face_check or "-" }}</dd></div>
+        </dl>
+        {% if log.notes %}<p>{{ log.notes }}</p>{% endif %}
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  <section class="flow-card">
+    <h2>配達個数を修正</h2>
+    <form method="post" action="/member/results/{{ target }}/delivery" class="formgrid count-form">
+      <label>完了<input type="number" name="completed" min="0" value="{{ delivery.completed if delivery else 0 }}"></label>
+      <label>転送<input type="number" name="transfer" min="0" value="{{ delivery.transfer if delivery else 0 }}"></label>
+      <label>夜間<input type="number" name="night" min="0" value="{{ delivery.night if delivery else 0 }}"></label>
+      <label>集荷/引受<input type="number" name="pickup" min="0" value="{{ delivery.pickup if delivery else 0 }}"></label>
+      <label>大型<input type="number" name="large" min="0" value="{{ delivery.large if delivery else 0 }}"></label>
+      <label class="wide-field">備考<textarea name="memo">{{ delivery.memo if delivery else "" }}</textarea></label>
+      <button class="primary wide-field" type="submit" data-saving-button>この内容で保存</button>
+    </form>
+  </section>
+
+  <section class="flow-card">
+    <h2>点検表写真</h2>
+    {% if inspection_image and inspection_image.image_available %}
+      <a class="button" href="{{ inspection_image.image_view_url }}" target="_blank" rel="noopener">点検表画像を開く</a>
+    {% elif inspection_image_path %}
+      <p class="alert">画像が見つかりません。再アップロードしてください。</p>
+      <p class="hint">{{ inspection_image_path }}</p>
+    {% else %}
+      <p class="hint">点検表写真は未登録です。</p>
+    {% endif %}
+  </section>
+
+  <section class="flow-card">
+    <h2>修正履歴</h2>
+    <div class="tablewrap compact-table">
+      <table>
+        <tr><th>日時</th><th>修正者</th><th>修正前</th><th>修正後</th><th>経路</th></tr>
+        {% for c in corrections %}
+        <tr>
+          <td>{{ c.changed_at }}</td>
+          <td>{{ c.actor_name or "本人" }}</td>
+          <td>完了{{ c.before_completed }} / 転送{{ c.before_transfer }} / 夜間{{ c.before_night }} / 集荷{{ c.before_pickup }} / 大型{{ c.before_large }}</td>
+          <td>完了{{ c.after_completed }} / 転送{{ c.after_transfer }} / 夜間{{ c.after_night }} / 集荷{{ c.after_pickup }} / 大型{{ c.after_large }}</td>
+          <td>{{ c.source }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5">修正履歴はありません。</td></tr>
+        {% endfor %}
+      </table>
+    </div>
+  </section>
+
+  <section class="flow-card result-delete-panel">
+    <h2>この日の出勤データを削除</h2>
+    <p class="hint">完全削除ではなく、通常集計から外す論理削除です。削除履歴は管理者画面にも残ります。</p>
+    <form method="post" action="/member/results/{{ target }}/delete" onsubmit="return confirm('この日の出勤データを削除しますか？削除しても履歴は残ります。');">
+      <label>削除理由<textarea name="reason" required placeholder="例：入力日を間違えたため"></textarea></label>
+      <button class="danger" type="submit">削除履歴を残して削除</button>
+    </form>
+    {% if deletions %}
+    <div class="history-line">削除履歴: {% for d in deletions %}{{ d.deleted_at }} {{ d.reason }}{% if not loop.last %} / {% endif %}{% endfor %}</div>
+    {% endif %}
+  </section>
+
+  <section class="flow-mini-panel">
+    <div class="flow-mini-grid">
+      <a class="flow-mini-button" href="/member/results"><span>月</span><b>月間実績</b></a>
+      <a class="flow-mini-button reward" href="/member/result-corrections"><span>履</span><b>修正履歴</b></a>
+      <a class="flow-mini-button" href="/member"><span>ホ</span><b>ホーム</b></a>
+    </div>
+  </section>
+</section>
+<script>
+  document.querySelectorAll("[data-saving-button]").forEach((button) => {
+    button.closest("form")?.addEventListener("submit", () => {
+      button.disabled = true;
+      button.textContent = "保存中...";
+    });
+  });
+</script>
+{% endblock %}

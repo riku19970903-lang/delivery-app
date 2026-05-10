@@ -55,15 +55,8 @@
       <small>走行距離とアルコールチェックだけで開始</small>
     </a>
     {% elif work_state.status == "working" %}
-    {% if feature_enabled('deliveries') %}
-    <a class="flow-primary-action delivery" href="/deliveries">
-      <span>次にやること</span>
-      <b>配達を入力する</b>
-      <small>途中で個数を入れる場合はこちら</small>
-    </a>
-    {% endif %}
     <a class="flow-primary-action end" href="/mobile/work/end">
-      <span>最後にやること</span>
+      <span>次にやること</span>
       <b>退勤する</b>
       <small>配達個数、点検表、終了点呼までまとめて登録</small>
     </a>
@@ -110,7 +103,6 @@
           <a class="flow-mini-button" href="/member"><span>ホ</span><b>ホーム</b></a>
           {% if feature_enabled('safety') %}<a class="flow-mini-button work" href="/mobile/work/start"><span>出</span><b>出勤・点呼</b></a>{% endif %}
           {% if feature_enabled('safety') %}<a class="flow-mini-button work" href="/mobile/work/end"><span>退</span><b>退勤・点呼</b></a>{% endif %}
-          {% if feature_enabled('deliveries') %}<a class="flow-mini-button delivery" href="/deliveries"><span>配</span><b>配達入力</b></a>{% endif %}
           {% if feature_enabled('inspection') %}<a class="flow-mini-button inspection" href="/inspection-sheets"><span>検</span><b>点検表</b></a>{% endif %}
         </div>
       </details>
@@ -121,7 +113,9 @@
           <a class="flow-mini-button reward" href="/mobile/work/end/complete?day={{ today }}"><span>今</span><b>今日の報酬</b></a>
           <a class="flow-mini-button reward" href="/rewards"><span>月</span><b>今月の報酬</b></a>
           <a class="flow-mini-button reward" href="/my-room"><span>単</span><b>単価確認</b></a>
-          <a class="flow-mini-button reward" href="/rewards"><span>履</span><b>報酬履歴</b></a>
+          <a class="flow-mini-button reward" href="/member/results"><span>実</span><b>実績カレンダー</b></a>
+          <a class="flow-mini-button reward" href="/member/results"><span>数</span><b>月間配達数</b></a>
+          <a class="flow-mini-button reward" href="/member/result-corrections"><span>履</span><b>修正履歴</b></a>
         </div>
       </details>
       {% endif %}

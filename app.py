@@ -38,7 +38,7 @@ if DATABASE_URL.startswith("postgres://"):
 USE_POSTGRES = bool(DATABASE_URL)
 DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "3"))
 DB_INIT_RETRY_SECONDS = int(os.getenv("DB_INIT_RETRY_SECONDS", "30"))
-SCHEMA_VERSION = "2026-05-10-finance-v1"
+SCHEMA_VERSION = "2026-05-10-member-results-v1"
 DB_INIT_ON_STARTUP = os.getenv("DB_INIT_ON_STARTUP", "0" if USE_POSTGRES else "1").lower() in {"1", "true", "yes", "on"}
 APP_NAME = "SPARKLE DRIVE"
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -98,10 +98,11 @@ FEATURE_CACHE_TTL_SECONDS = int(os.getenv("FEATURE_CACHE_TTL_SECONDS", "30"))
 SCHEMA_REQUIRED_COLUMNS = {
     "companies": ("id", "name", "status", "next_renewal_date"),
     "users": ("id", "company_id", "username", "password_hash", "role", "notification_email", "member_notes"),
-    "deliveries": ("id", "company_id", "user_id", "work_date", "completed", "inspection_sheet_path"),
-    "work_logs": ("id", "company_id", "user_id", "work_date", "log_type", "start_odometer", "end_odometer", "distance_km"),
-    "work_log_sessions": ("id", "company_id", "user_id", "work_date", "session_no", "status", "start_odometer", "end_odometer", "inspection_image_path"),
+    "deliveries": ("id", "company_id", "user_id", "work_date", "completed", "inspection_sheet_path", "is_deleted", "deleted_at"),
+    "work_logs": ("id", "company_id", "user_id", "work_date", "log_type", "start_odometer", "end_odometer", "distance_km", "is_deleted", "deleted_at"),
+    "work_log_sessions": ("id", "company_id", "user_id", "work_date", "session_no", "status", "start_odometer", "end_odometer", "inspection_image_path", "is_deleted", "deleted_at"),
     "work_log_corrections": ("id", "company_id", "user_id", "work_date", "before_data", "after_data", "actor_id"),
+    "work_day_deletions": ("id", "company_id", "user_id", "work_date", "deleted_at"),
     "vehicles": ("id", "company_id", "name", "active", "last_odometer", "inspection_due", "vehicle_status", "depot_id", "primary_user_id"),
     "vehicle_expenses": ("id", "company_id", "vehicle_id", "expense_date", "category", "amount"),
     "company_expenses": ("id", "company_id", "expense_date", "category", "amount"),
@@ -273,7 +274,7 @@ def _append_sql_clause(sql: str, clause: str) -> str:
 
 def _needs_returning_id(sql: str) -> bool:
     return bool(
-        re.match(r"^\s*INSERT\s+INTO\s+(users|vehicle_issues|companies|vehicles|vehicle_expenses|company_expenses|depot_rate_settings|work_logs|work_log_sessions|work_log_corrections|audit_logs)\b", sql, flags=re.IGNORECASE)
+        re.match(r"^\s*INSERT\s+INTO\s+(users|vehicle_issues|companies|vehicles|vehicle_expenses|company_expenses|depot_rate_settings|work_logs|work_log_sessions|work_log_corrections|work_day_deletions|audit_logs)\b", sql, flags=re.IGNORECASE)
         and "RETURNING" not in sql.upper()
         and "ON CONFLICT" not in sql.upper()
     )
@@ -1091,6 +1092,10 @@ def _init_db_schema():
                 voice_check TEXT NOT NULL,
                 admin_confirm TEXT DEFAULT '',
                 notes TEXT DEFAULT '',
+                is_deleted INTEGER NOT NULL DEFAULT 0,
+                deleted_at TEXT DEFAULT '',
+                deleted_by INTEGER,
+                delete_reason TEXT DEFAULT '',
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
@@ -1122,6 +1127,10 @@ def _init_db_schema():
                 inspection_sheet_id INTEGER,
                 inspection_image_path TEXT DEFAULT '',
                 notes TEXT DEFAULT '',
+                is_deleted INTEGER NOT NULL DEFAULT 0,
+                deleted_at TEXT DEFAULT '',
+                deleted_by INTEGER,
+                delete_reason TEXT DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id),
@@ -1141,6 +1150,10 @@ def _init_db_schema():
                 vehicle_rental TEXT NOT NULL DEFAULT 'none',
                 memo TEXT DEFAULT '',
                 inspection_sheet_path TEXT DEFAULT '',
+                is_deleted INTEGER NOT NULL DEFAULT 0,
+                deleted_at TEXT DEFAULT '',
+                deleted_by INTEGER,
+                delete_reason TEXT DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(user_id, work_date),
@@ -1182,6 +1195,18 @@ def _init_db_schema():
                 actor_id INTEGER,
                 changed_at TEXT NOT NULL,
                 note TEXT DEFAULT '',
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(actor_id) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS work_day_deletions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NOT NULL DEFAULT 1,
+                user_id INTEGER NOT NULL,
+                work_date TEXT NOT NULL,
+                actor_id INTEGER,
+                reason TEXT DEFAULT '',
+                before_data TEXT DEFAULT '',
+                deleted_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id),
                 FOREIGN KEY(actor_id) REFERENCES users(id)
             );
@@ -1439,6 +1464,10 @@ def _init_db_schema():
         ensure_column(conn, "work_logs", "voice_check", "TEXT DEFAULT ''")
         ensure_column(conn, "work_logs", "admin_confirm", "TEXT DEFAULT ''")
         ensure_column(conn, "work_logs", "notes", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_logs", "is_deleted", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_logs", "deleted_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_logs", "deleted_by", "INTEGER")
+        ensure_column(conn, "work_logs", "delete_reason", "TEXT DEFAULT ''")
         ensure_column(conn, "work_logs", "created_at", "TEXT DEFAULT ''")
         ensure_column(conn, "work_log_sessions", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "work_log_sessions", "user_id", "INTEGER NOT NULL DEFAULT 0")
@@ -1466,6 +1495,10 @@ def _init_db_schema():
         ensure_column(conn, "work_log_sessions", "inspection_sheet_id", "INTEGER")
         ensure_column(conn, "work_log_sessions", "inspection_image_path", "TEXT DEFAULT ''")
         ensure_column(conn, "work_log_sessions", "notes", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_sessions", "is_deleted", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_log_sessions", "deleted_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_log_sessions", "deleted_by", "INTEGER")
+        ensure_column(conn, "work_log_sessions", "delete_reason", "TEXT DEFAULT ''")
         ensure_column(conn, "work_log_sessions", "created_at", "TEXT DEFAULT ''")
         ensure_column(conn, "work_log_sessions", "updated_at", "TEXT DEFAULT ''")
         ensure_column(conn, "deliveries", "completed", "INTEGER NOT NULL DEFAULT 0")
@@ -1479,6 +1512,10 @@ def _init_db_schema():
         ensure_column(conn, "deliveries", "vehicle_rental", "TEXT NOT NULL DEFAULT 'none'")
         ensure_column(conn, "deliveries", "memo", "TEXT DEFAULT ''")
         ensure_column(conn, "deliveries", "inspection_sheet_path", "TEXT DEFAULT ''")
+        ensure_column(conn, "deliveries", "is_deleted", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "deliveries", "deleted_at", "TEXT DEFAULT ''")
+        ensure_column(conn, "deliveries", "deleted_by", "INTEGER")
+        ensure_column(conn, "deliveries", "delete_reason", "TEXT DEFAULT ''")
         ensure_column(conn, "deliveries", "created_at", "TEXT DEFAULT ''")
         ensure_column(conn, "deliveries", "updated_at", "TEXT DEFAULT ''")
         ensure_column(conn, "vehicles", "company_id", "INTEGER NOT NULL DEFAULT 1")
@@ -1560,6 +1597,13 @@ def _init_db_schema():
         ensure_column(conn, "work_log_corrections", "actor_id", "INTEGER")
         ensure_column(conn, "work_log_corrections", "changed_at", "TEXT DEFAULT ''")
         ensure_column(conn, "work_log_corrections", "note", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_day_deletions", "company_id", "INTEGER NOT NULL DEFAULT 1")
+        ensure_column(conn, "work_day_deletions", "user_id", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "work_day_deletions", "work_date", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_day_deletions", "actor_id", "INTEGER")
+        ensure_column(conn, "work_day_deletions", "reason", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_day_deletions", "before_data", "TEXT DEFAULT ''")
+        ensure_column(conn, "work_day_deletions", "deleted_at", "TEXT DEFAULT ''")
         ensure_column(conn, "shifts", "start_time", "TEXT DEFAULT ''")
         ensure_column(conn, "shifts", "company_id", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "shifts", "end_time", "TEXT DEFAULT ''")
@@ -1625,6 +1669,7 @@ def _init_db_schema():
             "CREATE INDEX IF NOT EXISTS idx_work_log_sessions_company_date_user ON work_log_sessions(company_id, work_date, user_id)",
             "CREATE INDEX IF NOT EXISTS idx_work_log_sessions_open ON work_log_sessions(company_id, work_date, status)",
             "CREATE INDEX IF NOT EXISTS idx_work_log_corrections_company_changed ON work_log_corrections(company_id, changed_at)",
+            "CREATE INDEX IF NOT EXISTS idx_work_day_deletions_company_date ON work_day_deletions(company_id, work_date)",
             "CREATE INDEX IF NOT EXISTS idx_vehicle_expenses_company_month ON vehicle_expenses(company_id, expense_date)",
             "CREATE INDEX IF NOT EXISTS idx_company_expenses_company_month ON company_expenses(company_id, expense_date)",
             "CREATE INDEX IF NOT EXISTS idx_depot_rate_settings_lookup ON depot_rate_settings(company_id, depot_id, effective_start)",
@@ -2468,7 +2513,7 @@ def monthly_reward_summary(user_id: int, target_month: date, company_id: Optiona
               COALESCE(SUM(large), 0) AS large_total,
               COUNT(*) AS delivery_days
            FROM deliveries
-           WHERE user_id=? AND work_date BETWEEN ? AND ?{company_filter}""",
+           WHERE user_id=? AND work_date BETWEEN ? AND ? AND COALESCE(is_deleted,0)=0{company_filter}""",
         params,
     )
     if company_id is not None:
@@ -2522,7 +2567,7 @@ def upcoming_member_shifts(user_id: int, today_s: str, company_id: Optional[int]
 def today_work_state(user_id: int, company_id: int, today_s: str):
     sessions = query_all(
         """SELECT * FROM work_log_sessions
-           WHERE user_id=? AND company_id=? AND work_date=?
+           WHERE user_id=? AND company_id=? AND work_date=? AND COALESCE(is_deleted,0)=0
            ORDER BY session_no, id""",
         (user_id, company_id, today_s),
     )
@@ -2536,13 +2581,13 @@ def today_work_state(user_id: int, company_id: int, today_s: str):
         return {"status": "finished", "label": f"退勤済（{len(sessions)}回）", "start_log": None, "end_log": None, "sessions": sessions, "open_session": None}
     start_log = query_one(
         """SELECT * FROM work_logs
-           WHERE user_id=? AND company_id=? AND work_date=? AND log_type='start'
+           WHERE user_id=? AND company_id=? AND work_date=? AND log_type='start' AND COALESCE(is_deleted,0)=0
            ORDER BY logged_at DESC LIMIT 1""",
         (user_id, company_id, today_s),
     )
     end_log = query_one(
         """SELECT * FROM work_logs
-           WHERE user_id=? AND company_id=? AND work_date=? AND log_type='end'
+           WHERE user_id=? AND company_id=? AND work_date=? AND log_type='end' AND COALESCE(is_deleted,0)=0
            ORDER BY logged_at DESC LIMIT 1""",
         (user_id, company_id, today_s),
     )
@@ -2556,7 +2601,7 @@ def today_work_state(user_id: int, company_id: int, today_s: str):
 def latest_odometer_for_user(user_id: int, company_id: int):
     row = query_one(
         """SELECT odometer FROM work_logs
-           WHERE user_id=? AND company_id=? AND COALESCE(odometer, 0)>0
+           WHERE user_id=? AND company_id=? AND COALESCE(odometer, 0)>0 AND COALESCE(is_deleted,0)=0
            ORDER BY work_date DESC, logged_at DESC LIMIT 1""",
         (user_id, company_id),
     )
@@ -2714,7 +2759,7 @@ def finance_delivery_rows(company_id: int, start_s: str, end_s: str, limit: int 
            LEFT JOIN shifts s ON s.user_id=d.user_id AND s.company_id=d.company_id AND s.shift_date=d.work_date
            LEFT JOIN districts dist ON dist.id=s.district_id AND dist.company_id=s.company_id
            LEFT JOIN depots dep ON dep.id=dist.depot_id AND dep.company_id=d.company_id
-           WHERE d.company_id=? AND d.work_date BETWEEN ? AND ?
+           WHERE d.company_id=? AND d.work_date BETWEEN ? AND ? AND COALESCE(d.is_deleted,0)=0
            ORDER BY d.work_date, depot_name, u.name
            LIMIT ?""",
         (company_id, start_s, end_s, limit),
@@ -2870,7 +2915,7 @@ def vehicle_for_user(user, company_id: Optional[int] = None):
             return vehicle
     latest = query_one(
         """SELECT vehicle_id FROM work_logs
-           WHERE user_id=? AND company_id=? AND vehicle_id IS NOT NULL
+           WHERE user_id=? AND company_id=? AND vehicle_id IS NOT NULL AND COALESCE(is_deleted,0)=0
            ORDER BY work_date DESC, logged_at DESC LIMIT 1""",
         (user["id"], company_id),
     )
@@ -2903,7 +2948,7 @@ def latest_vehicle_odometer(company_id: int, vehicle_id: Optional[int]):
         return vehicle["last_odometer"]
     row = query_one(
         """SELECT odometer FROM work_logs
-           WHERE company_id=? AND vehicle_id=? AND COALESCE(odometer, 0)>0
+           WHERE company_id=? AND vehicle_id=? AND COALESCE(odometer, 0)>0 AND COALESCE(is_deleted,0)=0
            ORDER BY work_date DESC, logged_at DESC LIMIT 1""",
         (company_id, vehicle_id),
     )
@@ -2959,7 +3004,7 @@ def odometer_log_values(conn, company_id: int, user_id: int, work_date: str, log
         return current, 0, 0
     start_log = conn.execute(
         """SELECT start_odometer, odometer FROM work_logs
-           WHERE company_id=? AND user_id=? AND work_date=? AND log_type='start'
+           WHERE company_id=? AND user_id=? AND work_date=? AND log_type='start' AND COALESCE(is_deleted,0)=0
            ORDER BY logged_at DESC LIMIT 1""",
         (company_id, user_id, work_date),
     ).fetchone()
@@ -2971,7 +3016,7 @@ def odometer_log_values(conn, company_id: int, user_id: int, work_date: str, log
 def open_work_session(company_id: int, user_id: int, work_date: str):
     return query_one(
         """SELECT * FROM work_log_sessions
-           WHERE company_id=? AND user_id=? AND work_date=? AND status='working'
+           WHERE company_id=? AND user_id=? AND work_date=? AND status='working' AND COALESCE(is_deleted,0)=0
            ORDER BY session_no DESC, id DESC LIMIT 1""",
         (company_id, user_id, work_date),
     )
@@ -2995,7 +3040,7 @@ def session_delivery_totals(company_id: int, user_id: int, work_date: str):
              COALESCE(SUM(large_count), 0) AS large,
              COUNT(*) AS session_count
            FROM work_log_sessions
-           WHERE company_id=? AND user_id=? AND work_date=?""",
+           WHERE company_id=? AND user_id=? AND work_date=? AND COALESCE(is_deleted,0)=0""",
         (company_id, user_id, work_date),
     )
 
@@ -3085,7 +3130,7 @@ def update_work_session_from_form(
     guard_sql = " AND user_id=?" if user_id_guard else ""
     guard_params = [user_id_guard] if user_id_guard else []
     before = query_one(
-        f"SELECT * FROM work_log_sessions WHERE id=? AND company_id=?{guard_sql}",
+        f"SELECT * FROM work_log_sessions WHERE id=? AND company_id=? AND COALESCE(is_deleted,0)=0{guard_sql}",
         [session_id, company_id] + guard_params,
     )
     if not before:
@@ -3107,7 +3152,7 @@ def update_work_session_from_form(
                    distance_km=?, status=?, alcohol_check_start=?, alcohol_check_end=?, call_check_start=?,
                    call_check_end=?, delivery_count=?, transfer_count=?, night_count=?, pickup_count=?,
                    large_count=?, inspection_image_path=?, notes=?, updated_at=?
-               WHERE id=? AND company_id=?""",
+               WHERE id=? AND company_id=? AND COALESCE(is_deleted,0)=0""",
             (
                 start_time,
                 end_time,
@@ -3138,7 +3183,7 @@ def update_work_session_from_form(
                 """UPDATE work_logs
                    SET logged_at=?, vehicle_id=?, vehicle_name=?, odometer=?, start_odometer=?,
                        alcohol_result=?, health_status=?, notes=?
-                   WHERE id=? AND company_id=?""",
+                   WHERE id=? AND company_id=? AND COALESCE(is_deleted,0)=0""",
                 (start_time, vehicle["id"] if vehicle else row_value(before, "vehicle_id"), vehicle_name, start_odo, start_odo, alcohol_check_start, call_check_start, notes, before["start_log_id"], company_id),
             )
         if row_value(before, "end_log_id"):
@@ -3146,13 +3191,13 @@ def update_work_session_from_form(
                 """UPDATE work_logs
                    SET logged_at=?, vehicle_id=?, vehicle_name=?, odometer=?, start_odometer=?, end_odometer=?,
                        distance_km=?, alcohol_result=?, detector_used=?, notes=?
-                   WHERE id=? AND company_id=?""",
+                   WHERE id=? AND company_id=? AND COALESCE(is_deleted,0)=0""",
                 (end_time, vehicle["id"] if vehicle else row_value(before, "vehicle_id"), vehicle_name, end_odo, start_odo, end_odo, distance_km, alcohol_check_end, call_check_end, notes, before["end_log_id"], company_id),
             )
         if vehicle:
             conn.execute("UPDATE users SET last_vehicle_id=?, vehicle=? WHERE id=? AND company_id=?", (vehicle["id"], vehicle["name"], before["user_id"], company_id))
         update_vehicle_odometer(conn, company_id, vehicle["id"] if vehicle else row_value(before, "vehicle_id"), vehicle_name, end_odo or start_odo, now)
-        after = conn.execute("SELECT * FROM work_log_sessions WHERE id=? AND company_id=?", (session_id, company_id)).fetchone()
+        after = conn.execute("SELECT * FROM work_log_sessions WHERE id=? AND company_id=? AND COALESCE(is_deleted,0)=0", (session_id, company_id)).fetchone()
         insert_work_log_correction(
             conn,
             company_id,
@@ -3340,13 +3385,14 @@ def upsert_delivery_counts(company_id: int, user_id: int, work_date: str, comple
     with db() as conn:
         existing = conn.execute("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user_id, company_id, work_date)).fetchone()
         conn.execute(
-            """INSERT INTO deliveries(company_id, user_id, work_date, completed, transfer, night, pickup, large, vehicle_rental, memo, inspection_sheet_path, created_at, updated_at, vehicle_id, vehicle_name)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """INSERT INTO deliveries(company_id, user_id, work_date, completed, transfer, night, pickup, large, vehicle_rental, memo, inspection_sheet_path, created_at, updated_at, vehicle_id, vehicle_name, is_deleted, deleted_at, deleted_by, delete_reason)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(user_id, work_date) DO UPDATE SET completed=excluded.completed, transfer=excluded.transfer,
                night=excluded.night, pickup=excluded.pickup, large=excluded.large, vehicle_rental=excluded.vehicle_rental,
                memo=excluded.memo, inspection_sheet_path=COALESCE(NULLIF(excluded.inspection_sheet_path, ''), deliveries.inspection_sheet_path),
                vehicle_id=COALESCE(excluded.vehicle_id, deliveries.vehicle_id),
                vehicle_name=COALESCE(NULLIF(excluded.vehicle_name, ''), deliveries.vehicle_name),
+               is_deleted=0, deleted_at='', deleted_by=NULL, delete_reason='',
                updated_at=excluded.updated_at, company_id=excluded.company_id""",
             (
                 company_id,
@@ -3364,6 +3410,10 @@ def upsert_delivery_counts(company_id: int, user_id: int, work_date: str, comple
                 now,
                 vehicle_id,
                 vehicle_name or "",
+                0,
+                "",
+                None,
+                "",
             ),
         )
         delivery = conn.execute("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user_id, company_id, work_date)).fetchone()
@@ -3383,6 +3433,197 @@ def upsert_delivery_counts(company_id: int, user_id: int, work_date: str, comple
             )
         conn.commit()
         return delivery
+
+
+def active_delivery_for_day(company_id: int, user_id: int, work_date: str):
+    return query_one(
+        "SELECT * FROM deliveries WHERE company_id=? AND user_id=? AND work_date=? AND COALESCE(is_deleted,0)=0",
+        (company_id, user_id, work_date),
+    )
+
+
+def active_sessions_for_day(company_id: int, user_id: int, work_date: str):
+    return query_all(
+        """SELECT s.*, v.plate_number
+           FROM work_log_sessions s
+           LEFT JOIN vehicles v ON v.id=s.vehicle_id AND v.company_id=s.company_id
+           WHERE s.company_id=? AND s.user_id=? AND s.work_date=? AND COALESCE(s.is_deleted,0)=0
+           ORDER BY s.session_no, s.id""",
+        (company_id, user_id, work_date),
+    )
+
+
+def active_work_logs_for_day(company_id: int, user_id: int, work_date: str):
+    return query_all(
+        """SELECT * FROM work_logs
+           WHERE company_id=? AND user_id=? AND work_date=? AND COALESCE(is_deleted,0)=0
+           ORDER BY logged_at, id""",
+        (company_id, user_id, work_date),
+    )
+
+
+def member_result_day_context(company_id: int, user_id: int, work_date: str):
+    delivery = active_delivery_for_day(company_id, user_id, work_date)
+    sessions = active_sessions_for_day(company_id, user_id, work_date)
+    logs = active_work_logs_for_day(company_id, user_id, work_date)
+    rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (user_id, company_id))
+    vehicle_rates = vehicle_rates_for_company(company_id)
+    reward = calc_reward(delivery, rates, vehicle_rates) if delivery else 0
+    slip = query_one(
+        "SELECT * FROM inspection_slips WHERE user_id=? AND company_id=? AND slip_date=?",
+        (user_id, company_id, work_date),
+    )
+    sheet = query_one(
+        "SELECT * FROM inspection_sheets WHERE user_id=? AND company_id=? AND (sheet_date=? OR COALESCE(delivery_date,'')=?)",
+        (user_id, company_id, work_date, work_date),
+    )
+    image_path = row_value(slip, "file_path", "") or row_value(delivery, "inspection_sheet_path", "") or row_value(sheet, "file_path", "")
+    corrections = query_all(
+        """SELECT c.*, a.name AS actor_name FROM delivery_corrections c
+           LEFT JOIN users a ON a.id=c.actor_id
+           WHERE c.user_id=? AND c.company_id=? AND c.work_date=?
+           ORDER BY c.changed_at DESC LIMIT 30""",
+        (user_id, company_id, work_date),
+    )
+    deletions = query_all(
+        """SELECT d.*, a.name AS actor_name FROM work_day_deletions d
+           LEFT JOIN users a ON a.id=d.actor_id
+           WHERE d.user_id=? AND d.company_id=? AND d.work_date=?
+           ORDER BY d.deleted_at DESC LIMIT 10""",
+        (user_id, company_id, work_date),
+    )
+    return {
+        "delivery": delivery,
+        "sessions": sessions,
+        "logs": logs,
+        "rates": rates,
+        "reward": reward,
+        "slip": slip,
+        "sheet": sheet,
+        "inspection_image_path": image_path,
+        "inspection_image": inspection_image_info(image_path),
+        "corrections": corrections,
+        "deletions": deletions,
+    }
+
+
+def member_month_calendar(company_id: int, user_id: int, month_text: Optional[str]):
+    start, end = month_bounds(month_text)
+    start_s, end_s = start.isoformat(), end.isoformat()
+    delivery_rows = query_all(
+        """SELECT * FROM deliveries
+           WHERE company_id=? AND user_id=? AND work_date BETWEEN ? AND ? AND COALESCE(is_deleted,0)=0
+           ORDER BY work_date""",
+        (company_id, user_id, start_s, end_s),
+    )
+    session_rows = query_all(
+        """SELECT work_date,
+                  COUNT(*) AS session_count,
+                  SUM(CASE WHEN status='working' THEN 1 ELSE 0 END) AS working_count,
+                  SUM(CASE WHEN COALESCE(end_time,'')<>'' OR status='finished' THEN 1 ELSE 0 END) AS finished_count
+           FROM work_log_sessions
+           WHERE company_id=? AND user_id=? AND work_date BETWEEN ? AND ? AND COALESCE(is_deleted,0)=0
+           GROUP BY work_date""",
+        (company_id, user_id, start_s, end_s),
+    )
+    log_rows = query_all(
+        """SELECT work_date,
+                  SUM(CASE WHEN log_type='start' THEN 1 ELSE 0 END) AS start_count,
+                  SUM(CASE WHEN log_type='end' THEN 1 ELSE 0 END) AS end_count
+           FROM work_logs
+           WHERE company_id=? AND user_id=? AND work_date BETWEEN ? AND ? AND COALESCE(is_deleted,0)=0
+           GROUP BY work_date""",
+        (company_id, user_id, start_s, end_s),
+    )
+    rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (user_id, company_id))
+    vehicle_rates = vehicle_rates_for_company(company_id)
+    by_day = {}
+    for delivery in delivery_rows:
+        item = by_day.setdefault(delivery["work_date"], {})
+        item["delivery"] = delivery
+        item["reward"] = calc_reward(delivery, rates, vehicle_rates) if rates else 0
+    for session in session_rows:
+        item = by_day.setdefault(session["work_date"], {})
+        item["session_count"] = int_value(session["session_count"])
+        item["working_count"] = int_value(session["working_count"])
+        item["finished_count"] = int_value(session["finished_count"])
+    for log in log_rows:
+        item = by_day.setdefault(log["work_date"], {})
+        item["start_count"] = int_value(log["start_count"])
+        item["end_count"] = int_value(log["end_count"])
+    weeks = []
+    cal = calendar.Calendar(firstweekday=6)
+    for week in cal.monthdatescalendar(start.year, start.month):
+        cells = []
+        for day_obj in week:
+            day_s = day_obj.isoformat()
+            data = by_day.get(day_s, {})
+            delivery = data.get("delivery")
+            start_count = int_value(data.get("start_count")) or int_value(data.get("session_count"))
+            end_count = int_value(data.get("end_count")) or int_value(data.get("finished_count"))
+            working_count = int_value(data.get("working_count"))
+            cells.append(
+                {
+                    "date": day_s,
+                    "day": day_obj.day,
+                    "current_month": day_obj.month == start.month,
+                    "is_today": day_s == app_today().isoformat(),
+                    "delivery": delivery,
+                    "reward": int_value(data.get("reward")),
+                    "has_work": bool(start_count),
+                    "finished": bool(end_count) and not working_count,
+                    "working": bool(working_count),
+                }
+            )
+        weeks.append(cells)
+    return {"start": start, "end": end, "target_month": start.strftime("%Y-%m"), "weeks": weeks}
+
+
+def logically_delete_work_day(company_id: int, user_id: int, work_date: str, actor, reason: str):
+    reason = (reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="削除理由を入力してください")
+    deleted_at = app_now().isoformat(timespec="seconds")
+    with db() as conn:
+        sessions = conn.execute("SELECT * FROM work_log_sessions WHERE company_id=? AND user_id=? AND work_date=? AND COALESCE(is_deleted,0)=0", (company_id, user_id, work_date)).fetchall()
+        logs = conn.execute("SELECT * FROM work_logs WHERE company_id=? AND user_id=? AND work_date=? AND COALESCE(is_deleted,0)=0", (company_id, user_id, work_date)).fetchall()
+        delivery = conn.execute("SELECT * FROM deliveries WHERE company_id=? AND user_id=? AND work_date=? AND COALESCE(is_deleted,0)=0", (company_id, user_id, work_date)).fetchone()
+        before = {
+            "sessions": [row_to_dict(row) for row in sessions],
+            "work_logs": [row_to_dict(row) for row in logs],
+            "delivery": row_to_dict(delivery),
+        }
+        if not sessions and not logs and not delivery:
+            raise HTTPException(status_code=404, detail="削除対象の出勤データが見つかりません")
+        conn.execute(
+            "UPDATE work_log_sessions SET is_deleted=1, deleted_at=?, deleted_by=?, delete_reason=?, updated_at=? WHERE company_id=? AND user_id=? AND work_date=? AND COALESCE(is_deleted,0)=0",
+            (deleted_at, row_value(actor, "id"), reason, deleted_at, company_id, user_id, work_date),
+        )
+        conn.execute(
+            "UPDATE work_logs SET is_deleted=1, deleted_at=?, deleted_by=?, delete_reason=? WHERE company_id=? AND user_id=? AND work_date=? AND COALESCE(is_deleted,0)=0",
+            (deleted_at, row_value(actor, "id"), reason, company_id, user_id, work_date),
+        )
+        conn.execute(
+            "UPDATE deliveries SET is_deleted=1, deleted_at=?, deleted_by=?, delete_reason=?, updated_at=? WHERE company_id=? AND user_id=? AND work_date=? AND COALESCE(is_deleted,0)=0",
+            (deleted_at, row_value(actor, "id"), reason, deleted_at, company_id, user_id, work_date),
+        )
+        cur = conn.execute(
+            """INSERT INTO work_day_deletions(company_id, user_id, work_date, actor_id, reason, before_data, deleted_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (company_id, user_id, work_date, row_value(actor, "id"), reason, json.dumps(before, ensure_ascii=False, default=str), deleted_at),
+        )
+        audit_log(
+            company_id,
+            actor,
+            "work_day.delete",
+            "work_day_deletions",
+            cur.lastrowid,
+            "Work day logically deleted",
+            before=before,
+            after={"work_date": work_date, "reason": reason, "deleted_at": deleted_at},
+            conn=conn,
+        )
+        conn.commit()
 
 
 def save_inspection_slip_record(company_id: int, user_id: int, delivery_id: int, work_date: str, image_path: str, original_filename: str = "", content_type: str = ""):
@@ -3842,13 +4083,13 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
     stats = query_one(
         """SELECT
              (SELECT COUNT(*) FROM users WHERE role='member' AND active=1 AND COALESCE(purged,0)=0 AND company_id=?) AS member_count,
-             (SELECT COUNT(*) FROM work_logs WHERE work_date=? AND company_id=?) AS log_count,
-             (SELECT COUNT(*) FROM deliveries WHERE work_date=? AND company_id=?) AS delivery_count""",
+             (SELECT COUNT(*) FROM work_logs WHERE work_date=? AND company_id=? AND COALESCE(is_deleted,0)=0) AS log_count,
+             (SELECT COUNT(*) FROM deliveries WHERE work_date=? AND company_id=? AND COALESCE(is_deleted,0)=0) AS delivery_count""",
         (company_id, today_s, company_id, today_s, company_id),
     )
     logs = query_all(
         """SELECT w.*, u.name FROM work_logs w JOIN users u ON u.id = w.user_id
-           WHERE w.work_date = ? AND w.company_id=? ORDER BY w.logged_at DESC LIMIT 30""",
+           WHERE w.work_date = ? AND w.company_id=? AND COALESCE(w.is_deleted,0)=0 ORDER BY w.logged_at DESC LIMIT 30""",
         (today_s, company_id),
     )
     issues = query_all(
@@ -3861,7 +4102,7 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
            FROM deliveries d
            JOIN users u ON u.id = d.user_id
            LEFT JOIN inspection_slips s ON s.delivery_id=d.id AND s.company_id=d.company_id
-           WHERE d.work_date = ? AND d.company_id=? ORDER BY u.name LIMIT 100""",
+           WHERE d.work_date = ? AND d.company_id=? AND COALESCE(d.is_deleted,0)=0 ORDER BY u.name LIMIT 100""",
         (today_s, company_id),
     )
     deliveries = attach_image_info_lazy(deliveries, "slip_path")
@@ -3896,8 +4137,8 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
                   COALESCE(MAX(d.large), 0) AS large,
                   MAX(CASE WHEN COALESCE(sl.file_path, '')<>'' OR COALESCE(sh.file_path, '')<>'' OR COALESCE(d.inspection_sheet_path, '')<>'' THEN 1 ELSE 0 END) AS has_inspection
            FROM users u
-           LEFT JOIN work_logs w ON w.user_id=u.id AND w.company_id=u.company_id AND w.work_date=?
-           LEFT JOIN deliveries d ON d.user_id=u.id AND d.company_id=u.company_id AND d.work_date=?
+           LEFT JOIN work_logs w ON w.user_id=u.id AND w.company_id=u.company_id AND w.work_date=? AND COALESCE(w.is_deleted,0)=0
+           LEFT JOIN deliveries d ON d.user_id=u.id AND d.company_id=u.company_id AND d.work_date=? AND COALESCE(d.is_deleted,0)=0
            LEFT JOIN inspection_slips sl ON sl.user_id=u.id AND sl.company_id=u.company_id AND sl.slip_date=?
            LEFT JOIN inspection_sheets sh ON sh.user_id=u.id AND sh.company_id=u.company_id AND (sh.sheet_date=? OR COALESCE(sh.delivery_date, '')=?)
            WHERE u.company_id=? AND u.role='member' AND u.active=1 AND COALESCE(u.purged,0)=0
@@ -3914,7 +4155,7 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
                   SUM(distance_km) AS distance_total,
                   MAX(CASE WHEN COALESCE(inspection_image_path, '')<>'' OR inspection_sheet_id IS NOT NULL THEN 1 ELSE 0 END) AS has_session_inspection
            FROM work_log_sessions
-           WHERE company_id=? AND work_date=?
+           WHERE company_id=? AND work_date=? AND COALESCE(is_deleted,0)=0
            GROUP BY user_id""",
         (company_id, today_s),
     )
@@ -3967,7 +4208,7 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
            LEFT JOIN shifts s ON s.user_id=u.id AND s.company_id=u.company_id AND s.shift_date=? AND s.decided=1
            LEFT JOIN districts dist ON dist.id=s.district_id AND dist.company_id=s.company_id
            LEFT JOIN depots p ON p.id=dist.depot_id AND p.company_id=s.company_id
-           LEFT JOIN deliveries d ON d.user_id=u.id AND d.company_id=u.company_id AND d.work_date=?
+           LEFT JOIN deliveries d ON d.user_id=u.id AND d.company_id=u.company_id AND d.work_date=? AND COALESCE(d.is_deleted,0)=0
            LEFT JOIN rates r ON r.user_id=u.id AND r.company_id=u.company_id
            WHERE u.company_id=? AND u.role='member' AND u.active=1 AND COALESCE(u.purged,0)=0
            ORDER BY depot_name, u.name LIMIT 200""",
@@ -4002,7 +4243,7 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
            FROM work_log_sessions s
            JOIN users u ON u.id=s.user_id AND u.company_id=s.company_id
            LEFT JOIN vehicles v ON v.id=s.vehicle_id AND v.company_id=s.company_id
-           WHERE s.company_id=? AND s.work_date=?
+           WHERE s.company_id=? AND s.work_date=? AND COALESCE(s.is_deleted,0)=0
            ORDER BY s.session_no, s.start_time LIMIT 120""",
         (company_id, today_s),
     )
@@ -4013,7 +4254,7 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
                   SUM(s.night_count) AS night, SUM(s.pickup_count) AS pickup, SUM(s.large_count) AS large
            FROM work_log_sessions s
            JOIN users u ON u.id=s.user_id AND u.company_id=s.company_id
-           WHERE s.company_id=? AND s.work_date=?
+           WHERE s.company_id=? AND s.work_date=? AND COALESCE(s.is_deleted,0)=0
            GROUP BY s.user_id, u.name
            ORDER BY u.name LIMIT 200""",
         (company_id, today_s),
@@ -4022,7 +4263,7 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
         """SELECT COALESCE(NULLIF(s.vehicle_name, ''), '車両未設定') AS vehicle_name,
                   COUNT(*) AS session_count, SUM(s.distance_km) AS distance_km
            FROM work_log_sessions s
-           WHERE s.company_id=? AND s.work_date=?
+           WHERE s.company_id=? AND s.work_date=? AND COALESCE(s.is_deleted,0)=0
            GROUP BY COALESCE(NULLIF(s.vehicle_name, ''), '車両未設定')
            ORDER BY vehicle_name LIMIT 100""",
         (company_id, today_s),
@@ -4710,16 +4951,16 @@ def my_room_page(request: Request, message: str = "", error: str = "", user=Depe
     month_summary = monthly_reward_summary(user["id"], app_today(), company_id)
     attendance = query_one(
         """SELECT COUNT(*) AS count FROM (
-             SELECT work_date FROM work_logs WHERE user_id=? AND company_id=?
+             SELECT work_date FROM work_logs WHERE user_id=? AND company_id=? AND COALESCE(is_deleted,0)=0
              UNION
-             SELECT work_date FROM work_log_sessions WHERE user_id=? AND company_id=?
+             SELECT work_date FROM work_log_sessions WHERE user_id=? AND company_id=? AND COALESCE(is_deleted,0)=0
            ) days""",
         (user["id"], company_id, user["id"], company_id),
     )
     sessions = query_all(
         """SELECT s.*, v.plate_number FROM work_log_sessions s
            LEFT JOIN vehicles v ON v.id=s.vehicle_id AND v.company_id=s.company_id
-           WHERE s.user_id=? AND s.company_id=?
+           WHERE s.user_id=? AND s.company_id=? AND COALESCE(s.is_deleted,0)=0
            ORDER BY s.work_date DESC, s.session_no DESC LIMIT 12""",
         (user["id"], company_id),
     )
@@ -5379,7 +5620,7 @@ def mobile_vehicle_change(vehicle_id: int = Form(...), user=Depends(require_user
             """UPDATE work_logs SET vehicle_id=?, vehicle_name=?
                WHERE id IN (
                    SELECT id FROM work_logs
-                   WHERE user_id=? AND company_id=? AND work_date=? AND log_type='start'
+                   WHERE user_id=? AND company_id=? AND work_date=? AND log_type='start' AND COALESCE(is_deleted,0)=0
                    ORDER BY logged_at DESC LIMIT 1
                )""",
             (vehicle["id"], vehicle_label(vehicle), user["id"], company_id, today_s),
@@ -5406,7 +5647,7 @@ def member_home(request: Request, user=Depends(require_user)):
     now_dt = app_now()
     today_s = now_dt.date().isoformat()
     company_id = company_id_for(user)
-    delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user["id"], company_id, today_s))
+    delivery = active_delivery_for_day(company_id, user["id"], today_s)
     rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (user["id"], company_id))
     vehicle_rates = vehicle_rates_for_company(company_id)
     reward = calc_reward(delivery, rates, vehicle_rates) if delivery else 0
@@ -5451,13 +5692,109 @@ def member_home(request: Request, user=Depends(require_user)):
     )
 
 
+@app.get("/member/results", response_class=HTMLResponse)
+def member_results_calendar_page(request: Request, month: Optional[str] = None, user=Depends(require_user)):
+    require_feature(user, "deliveries")
+    if user["role"] == "admin":
+        return RedirectResponse("/admin", status_code=303)
+    company_id = company_id_for(user)
+    calendar_data = member_month_calendar(company_id, user["id"], month)
+    return render(request, "member_results_calendar.html", {"calendar_data": calendar_data})
+
+
+@app.get("/member/result-corrections", response_class=HTMLResponse)
+def member_result_corrections_page(request: Request, user=Depends(require_user)):
+    require_feature(user, "deliveries")
+    if user["role"] == "admin":
+        return RedirectResponse("/admin", status_code=303)
+    company_id = company_id_for(user)
+    corrections = query_all(
+        """SELECT c.*, a.name AS actor_name FROM delivery_corrections c
+           LEFT JOIN users a ON a.id=c.actor_id
+           WHERE c.user_id=? AND c.company_id=?
+           ORDER BY c.changed_at DESC LIMIT 100""",
+        (user["id"], company_id),
+    )
+    deletions = query_all(
+        """SELECT d.*, a.name AS actor_name FROM work_day_deletions d
+           LEFT JOIN users a ON a.id=d.actor_id
+           WHERE d.user_id=? AND d.company_id=?
+           ORDER BY d.deleted_at DESC LIMIT 100""",
+        (user["id"], company_id),
+    )
+    return render(request, "member_result_corrections.html", {"corrections": corrections, "deletions": deletions})
+
+
+@app.get("/member/results/{work_date}", response_class=HTMLResponse)
+def member_result_detail_page(request: Request, work_date: str, message: str = "", error: str = "", user=Depends(require_user)):
+    require_feature(user, "deliveries")
+    if user["role"] == "admin":
+        return RedirectResponse("/admin", status_code=303)
+    if not parse_iso_date(work_date):
+        raise HTTPException(status_code=400, detail="日付が正しくありません")
+    company_id = company_id_for(user)
+    context = member_result_day_context(company_id, user["id"], work_date)
+    context.update({"target": work_date, "message": message, "error": error})
+    return render(request, "member_result_detail.html", context)
+
+
+@app.post("/member/results/{work_date}/delivery")
+def member_result_update_delivery(
+    work_date: str,
+    completed: int = Form(0),
+    transfer: int = Form(0),
+    night: int = Form(0),
+    pickup: int = Form(0),
+    large: int = Form(0),
+    memo: str = Form(""),
+    user=Depends(require_user),
+):
+    require_feature(user, "deliveries")
+    if user["role"] == "admin":
+        raise HTTPException(status_code=403, detail="メンバーとしてログインしてください")
+    if not parse_iso_date(work_date):
+        raise HTTPException(status_code=400, detail="日付が正しくありません")
+    company_id = company_id_for(user)
+    selected_vehicle = vehicle_for_user(user, company_id)
+    upsert_delivery_counts(
+        company_id,
+        user["id"],
+        work_date,
+        completed,
+        transfer,
+        night,
+        pickup,
+        large,
+        "none",
+        memo,
+        "",
+        user["id"],
+        "実績カレンダー修正",
+        row_value(selected_vehicle, "id"),
+        vehicle_label(selected_vehicle) if selected_vehicle else "",
+    )
+    return RedirectResponse(f"/member/results/{work_date}?message=" + quote("配達個数を更新しました"), status_code=303)
+
+
+@app.post("/member/results/{work_date}/delete")
+def member_result_delete_work_day(work_date: str, reason: str = Form(...), user=Depends(require_user)):
+    require_feature(user, "deliveries")
+    if user["role"] == "admin":
+        raise HTTPException(status_code=403, detail="メンバーとしてログインしてください")
+    if not parse_iso_date(work_date):
+        raise HTTPException(status_code=400, detail="日付が正しくありません")
+    logically_delete_work_day(company_id_for(user), user["id"], work_date, user, reason)
+    month = work_date[:7]
+    return RedirectResponse(f"/member/results?month={month}", status_code=303)
+
+
 @app.get("/work-log", response_class=HTMLResponse)
 def work_log_page(request: Request, type: str = "start", user=Depends(require_user)):
     require_feature(user, "safety")
     log_type = type if type in {"start", "end"} else "start"
     now = app_now()
     logs = query_all(
-        "SELECT * FROM work_logs WHERE user_id=? AND company_id=? ORDER BY logged_at DESC LIMIT 20",
+        "SELECT * FROM work_logs WHERE user_id=? AND company_id=? AND COALESCE(is_deleted,0)=0 ORDER BY logged_at DESC LIMIT 20",
         (user["id"], company_id_for(user)),
     )
     vehicles, selected_vehicle = selected_vehicle_context(user)
@@ -5593,7 +5930,7 @@ def mobile_work_start(
     with db() as conn:
         open_session = conn.execute(
             """SELECT id FROM work_log_sessions
-               WHERE company_id=? AND user_id=? AND work_date=? AND status='working'
+               WHERE company_id=? AND user_id=? AND work_date=? AND status='working' AND COALESCE(is_deleted,0)=0
                ORDER BY id DESC LIMIT 1""",
             (company_id, user["id"], work_date),
         ).fetchone()
@@ -5701,7 +6038,7 @@ def mobile_work_end_page(request: Request, user=Depends(require_user)):
     if state["status"] == "finished":
         return RedirectResponse(f"/mobile/work/end/complete?day={today_s}", status_code=303)
     open_session = state.get("open_session")
-    delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user["id"], company_id, today_s))
+    delivery = active_delivery_for_day(company_id, user["id"], today_s)
     sheet = query_one(
         """SELECT * FROM inspection_sheets
            WHERE user_id=? AND company_id=? AND (sheet_date=? OR COALESCE(delivery_date, '')=?)
@@ -5926,7 +6263,7 @@ def mobile_work_end_save(
                        alcohol_check_end=?, call_check_end=?, delivery_count=?, transfer_count=?,
                        night_count=?, pickup_count=?, large_count=?, inspection_image_path=COALESCE(NULLIF(?, ''), inspection_image_path),
                        notes=COALESCE(NULLIF(?, ''), notes), updated_at=?
-                   WHERE id=? AND company_id=? AND user_id=?""",
+                   WHERE id=? AND company_id=? AND user_id=? AND COALESCE(is_deleted,0)=0""",
                 (
                     logged_at_value,
                     cur.lastrowid,
@@ -5980,7 +6317,7 @@ def mobile_work_end_save(
     if image_path and delivery:
         slip_id = save_inspection_slip_record(company_id, user["id"], delivery["id"], work_date, image_path, original_filename, content_type)
     if slip_id and session_id:
-        execute("UPDATE work_log_sessions SET inspection_sheet_id=? WHERE id=? AND company_id=? AND user_id=?", (slip_id, session_id, company_id, user["id"]))
+        execute("UPDATE work_log_sessions SET inspection_sheet_id=? WHERE id=? AND company_id=? AND user_id=? AND COALESCE(is_deleted,0)=0", (slip_id, session_id, company_id, user["id"]))
     return RedirectResponse(f"/mobile/work/end/complete?day={work_date}", status_code=303)
 
 
@@ -5991,7 +6328,7 @@ def mobile_work_complete(request: Request, day: Optional[str] = None, user=Depen
         return RedirectResponse("/admin", status_code=303)
     target = day or app_today().isoformat()
     company_id = company_id_for(user)
-    delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user["id"], company_id, target))
+    delivery = active_delivery_for_day(company_id, user["id"], target)
     rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (user["id"], company_id))
     vehicle_rates = vehicle_rates_for_company(company_id)
     reward = calc_reward(delivery, rates, vehicle_rates) if delivery else 0
@@ -6010,7 +6347,7 @@ def delivery_page(request: Request, day: Optional[str] = None, user=Depends(requ
                FROM deliveries d
                JOIN users u ON u.id=d.user_id
                LEFT JOIN inspection_slips s ON s.delivery_id=d.id AND s.company_id=d.company_id
-               WHERE d.work_date=? AND d.company_id=? ORDER BY u.name LIMIT 300""",
+               WHERE d.work_date=? AND d.company_id=? AND COALESCE(d.is_deleted,0)=0 ORDER BY u.name LIMIT 300""",
             (target, company_id),
         )
         rows = attach_image_info(rows, "slip_path")
@@ -6025,7 +6362,7 @@ def delivery_page(request: Request, day: Optional[str] = None, user=Depends(requ
         )
         return render(request, "admin_deliveries.html", {"rows": rows, "target": target, "corrections": corrections})
     company_id = company_id_for(user)
-    delivery = query_one("SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date=?", (user["id"], company_id, target))
+    delivery = active_delivery_for_day(company_id, user["id"], target)
     slip = query_one("SELECT * FROM inspection_slips WHERE user_id=? AND company_id=? AND slip_date=?", (user["id"], company_id, target))
     sheet = query_one("SELECT * FROM inspection_sheets WHERE user_id=? AND company_id=? AND sheet_date=?", (user["id"], company_id, target))
     rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (user["id"], company_id))
@@ -6132,7 +6469,16 @@ def delivery_corrections_page(request: Request, day: Optional[str] = None, user=
            ORDER BY c.changed_at DESC LIMIT 200""",
         (company_id, target),
     )
-    return render(request, "delivery_corrections.html", {"rows": rows, "target": target})
+    deletions = query_all(
+        """SELECT d.*, u.name AS member_name, a.name AS actor_name
+           FROM work_day_deletions d
+           JOIN users u ON u.id=d.user_id AND u.company_id=d.company_id
+           LEFT JOIN users a ON a.id=d.actor_id
+           WHERE d.company_id=? AND d.work_date=?
+           ORDER BY d.deleted_at DESC LIMIT 100""",
+        (company_id, target),
+    )
+    return render(request, "delivery_corrections.html", {"rows": rows, "target": target, "deletions": deletions})
 
 
 @app.get("/inspection-sheets", response_class=HTMLResponse)
@@ -6415,7 +6761,7 @@ def reward_target_for_user(user, member_id: Optional[int] = None):
 
 def reward_daily_rows(company_id: int, viewing_user_id: int, start: date, end: date):
     rows = query_all(
-        "SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date BETWEEN ? AND ? ORDER BY work_date",
+        "SELECT * FROM deliveries WHERE user_id=? AND company_id=? AND work_date BETWEEN ? AND ? AND COALESCE(is_deleted,0)=0 ORDER BY work_date",
         (viewing_user_id, company_id, start.isoformat(), end.isoformat()),
     )
     rates = query_one("SELECT * FROM rates WHERE user_id=? AND company_id=?", (viewing_user_id, company_id))
@@ -6918,7 +7264,7 @@ def build_daily_report_rows(company_id: int, start_date: str, end_date: str, mem
             FROM work_log_sessions s
             JOIN users u ON u.id=s.user_id AND u.company_id=s.company_id
             LEFT JOIN vehicles v ON v.id=s.vehicle_id AND v.company_id=s.company_id
-            WHERE s.company_id=? AND s.work_date BETWEEN ? AND ? {member_clause} {vehicle_clause_sessions}
+            WHERE s.company_id=? AND s.work_date BETWEEN ? AND ? AND COALESCE(s.is_deleted,0)=0 {member_clause} {vehicle_clause_sessions}
             ORDER BY s.work_date, u.name, s.session_no""",
         session_params,
     )
@@ -6927,7 +7273,7 @@ def build_daily_report_rows(company_id: int, start_date: str, end_date: str, mem
             FROM work_logs w
             JOIN users u ON u.id=w.user_id AND u.company_id=w.company_id
             LEFT JOIN vehicles v ON v.id=w.vehicle_id AND v.company_id=w.company_id
-            WHERE w.company_id=? AND w.work_date BETWEEN ? AND ? {member_clause} {vehicle_clause_logs}
+            WHERE w.company_id=? AND w.work_date BETWEEN ? AND ? AND COALESCE(w.is_deleted,0)=0 {member_clause} {vehicle_clause_logs}
             ORDER BY w.work_date, u.name, w.logged_at""",
         log_params,
     )
@@ -6936,7 +7282,7 @@ def build_daily_report_rows(company_id: int, start_date: str, end_date: str, mem
             FROM deliveries d
             JOIN users u ON u.id=d.user_id AND u.company_id=d.company_id
             LEFT JOIN vehicles v ON v.id=d.vehicle_id AND v.company_id=d.company_id
-            WHERE d.company_id=? AND d.work_date BETWEEN ? AND ? {member_clause} {vehicle_clause_deliveries}
+            WHERE d.company_id=? AND d.work_date BETWEEN ? AND ? AND COALESCE(d.is_deleted,0)=0 {member_clause} {vehicle_clause_deliveries}
             ORDER BY d.work_date, u.name""",
         delivery_params,
     )
@@ -7039,7 +7385,7 @@ def admin_update_work_log(
 ):
     require_feature(user, "safety")
     company_id = company_id_for(user)
-    before = query_one("SELECT * FROM work_logs WHERE id=? AND company_id=?", (log_id, company_id))
+    before = query_one("SELECT * FROM work_logs WHERE id=? AND company_id=? AND COALESCE(is_deleted,0)=0", (log_id, company_id))
     if not before:
         raise HTTPException(status_code=404, detail="Work log not found")
     vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=?", (vehicle_id, company_id)) if vehicle_id else None
@@ -7064,6 +7410,7 @@ def admin_update_work_log(
             end_log = conn.execute(
                 """SELECT * FROM work_logs
                    WHERE company_id=? AND user_id=? AND work_date=? AND log_type='end'
+                     AND COALESCE(is_deleted,0)=0
                    ORDER BY logged_at DESC LIMIT 1""",
                 (company_id, before["user_id"], work_date),
             ).fetchone()
@@ -7079,7 +7426,7 @@ def admin_update_work_log(
                 (vehicle["id"], vehicle["name"], before["user_id"], company_id),
             )
         update_vehicle_odometer(conn, company_id, vehicle["id"] if vehicle else row_value(before, "vehicle_id"), vehicle_name, odometer, app_now().isoformat(timespec="seconds"))
-        after = conn.execute("SELECT * FROM work_logs WHERE id=? AND company_id=?", (log_id, company_id)).fetchone()
+        after = conn.execute("SELECT * FROM work_logs WHERE id=? AND company_id=? AND COALESCE(is_deleted,0)=0", (log_id, company_id)).fetchone()
         audit_log(
             company_id,
             user,
@@ -7099,13 +7446,13 @@ def admin_update_work_log(
 def admin_safety(request: Request, message: str = "", user=Depends(require_admin)):
     require_feature(user, "safety")
     company_id = company_id_for(user)
-    logs = query_all("""SELECT w.*, u.name FROM work_logs w JOIN users u ON u.id=w.user_id WHERE w.company_id=? ORDER BY w.logged_at DESC LIMIT 100""", (company_id,))
+    logs = query_all("""SELECT w.*, u.name FROM work_logs w JOIN users u ON u.id=w.user_id WHERE w.company_id=? AND COALESCE(w.is_deleted,0)=0 ORDER BY w.logged_at DESC LIMIT 100""", (company_id,))
     members = query_all("SELECT id, name FROM users WHERE role='member' AND company_id=? ORDER BY active DESC, name LIMIT 200", (company_id,))
     vehicles = vehicle_rows_for_company(company_id, include_inactive=True)
     sessions = query_all(
         """SELECT s.*, u.name FROM work_log_sessions s
            JOIN users u ON u.id=s.user_id AND u.company_id=s.company_id
-           WHERE s.company_id=?
+           WHERE s.company_id=? AND COALESCE(s.is_deleted,0)=0
            ORDER BY s.work_date DESC, s.session_no DESC, s.id DESC LIMIT 100""",
         (company_id,),
     )
