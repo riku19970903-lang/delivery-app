@@ -108,9 +108,11 @@
       </header>
       <div class="vehicle-metrics">
         <div><span>現在距離</span><b>{{ "{:,}".format(v.last_odometer or 0) }}km</b></div>
+        <div><span>前回オイル交換距離</span><b>{{ "{:,}".format(v.oil_change_odometer or 0) }}km</b></div>
         <div><span>オイル残</span><b>{{ "{:,}".format(v.oil_remaining or 0) }}km</b></div>
         <div><span>車検</span><b>{{ v.inspection_due or "未設定" }}</b></div>
         {% if is_admin_view %}<div><span>今月車両費</span><b>¥{{ "{:,.0f}".format(v.month_vehicle_cost or 0) }}</b></div>{% endif %}
+        {% if is_admin_view %}<div><span>登録済み固定費</span><b>¥{{ "{:,.0f}".format(v.fixed_cost_total or 0) }}</b></div>{% endif %}
       </div>
       <p><span class="vehicle-alert {{ v.alert.oil_level }}">{{ v.alert.oil_message }}</span></p>
       <p><span class="vehicle-alert {{ v.alert.inspection_level }}">{{ v.alert.inspection_message }}</span></p>

@@ -2890,6 +2890,14 @@ def build_finance_dashboard(company_id: int, target_month: Optional[str]):
         trend_start, trend_end = month_bounds(f"{year:04d}-{month:02d}")
         trend = finance_totals_for_period(company_id, trend_start.isoformat(), trend_end.isoformat())
         trend_rows.append({"month": trend_start.strftime("%Y-%m"), **trend})
+    max_revenue = max([money_value(row.get("revenue_total", 0)) for row in trend_rows] + [money_value(totals["revenue_total"]), 1])
+    max_profit = max([abs(money_value(row.get("gross_profit", 0))) for row in trend_rows] + [abs(money_value(totals["gross_profit"])), 1])
+    max_driver_reward = max([money_value(row.get("driver_reward_total", 0)) for row in trend_rows] + [money_value(totals["driver_reward_total"]), 1])
+    max_delivery_count = max([int_value(row.get("delivery_count_total", 0)) for row in trend_rows] + [int_value(totals["delivery_count_total"]), 1])
+    max_margin = max([abs(money_value(row.get("gross_margin", 0))) for row in trend_rows] + [abs(money_value(totals["gross_margin"])), 1])
+    max_depot_revenue = max([money_value(row.get("revenue", 0)) for row in totals["depot_rows"]] + [1])
+    max_vehicle_category = max([money_value(row_value(row, "total", 0)) for row in vehicle_category_rows] + [1])
+    max_vehicle_rank = max([money_value(row_value(row, "total", 0)) for row in vehicle_rank_rows] + [1])
     return {
         **totals,
         "start": start,
@@ -2903,6 +2911,14 @@ def build_finance_dashboard(company_id: int, target_month: Optional[str]):
         "vehicle_rank_rows": vehicle_rank_rows,
         "company_expense_rows": company_expense_rows,
         "trend_rows": trend_rows,
+        "chart_max_revenue": max_revenue,
+        "chart_max_profit": max_profit,
+        "chart_max_driver_reward": max_driver_reward,
+        "chart_max_delivery_count": max_delivery_count,
+        "chart_max_margin": max_margin,
+        "chart_max_depot_revenue": max_depot_revenue,
+        "chart_max_vehicle_category": max_vehicle_category,
+        "chart_max_vehicle_rank": max_vehicle_rank,
     }
 
 

@@ -51,26 +51,50 @@
     <div class="finance-chart">
       <h3>月別売上推移</h3>
       {% for row in dashboard.trend_rows %}
-      <div class="bar-row"><span>{{ row.month }}</span><div><i style="width: {{ (row.revenue_total / dashboard.revenue_total * 100) if dashboard.revenue_total else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.revenue_total or 0) }}</b></div>
+      <div class="bar-row"><span>{{ row.month }}</span><div><i style="width: {{ (row.revenue_total / dashboard.chart_max_revenue * 100) if dashboard.chart_max_revenue else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.revenue_total or 0) }}</b></div>
       {% endfor %}
     </div>
     <div class="finance-chart">
       <h3>月別粗利推移</h3>
       {% for row in dashboard.trend_rows %}
-      <div class="bar-row"><span>{{ row.month }}</span><div><i class="{{ 'neg' if row.gross_profit < 0 else '' }}" style="width: {{ ((row.gross_profit if row.gross_profit > 0 else 0) / dashboard.revenue_total * 100) if dashboard.revenue_total else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.gross_profit or 0) }}</b></div>
+      <div class="bar-row"><span>{{ row.month }}</span><div><i class="{{ 'neg' if row.gross_profit < 0 else '' }}" style="width: {{ ((row.gross_profit|abs) / dashboard.chart_max_profit * 100) if dashboard.chart_max_profit else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.gross_profit or 0) }}</b></div>
       {% endfor %}
+    </div>
+    <div class="finance-chart">
+      <h3>拠点別売上</h3>
+      {% for row in dashboard.depot_rows %}
+      <div class="bar-row"><span>{{ row.depot_name }}</span><div><i style="width: {{ (row.revenue / dashboard.chart_max_depot_revenue * 100) if dashboard.chart_max_depot_revenue else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.revenue or 0) }}</b></div>
+      {% else %}<p class="hint">拠点別売上はまだありません。</p>{% endfor %}
     </div>
     <div class="finance-chart">
       <h3>車両費カテゴリー別</h3>
       {% for row in dashboard.vehicle_category_rows %}
-      <div class="bar-row"><span>{{ row.category }}</span><div><i style="width: {{ (row.total / dashboard.vehicle_expense_total * 100) if dashboard.vehicle_expense_total else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.total or 0) }}</b></div>
+      <div class="bar-row"><span>{{ row.category }}</span><div><i style="width: {{ (row.total / dashboard.chart_max_vehicle_category * 100) if dashboard.chart_max_vehicle_category else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.total or 0) }}</b></div>
       {% else %}<p class="hint">車両費は未登録です。</p>{% endfor %}
     </div>
     <div class="finance-chart">
       <h3>車両ごとの費用ランキング</h3>
       {% for row in dashboard.vehicle_rank_rows %}
-      <div class="bar-row"><span>{{ row.vehicle_name }}</span><div><i style="width: {{ (row.total / dashboard.vehicle_expense_total * 100) if dashboard.vehicle_expense_total else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.total or 0) }}</b></div>
+      <div class="bar-row"><span>{{ row.vehicle_name }}</span><div><i style="width: {{ (row.total / dashboard.chart_max_vehicle_rank * 100) if dashboard.chart_max_vehicle_rank else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.total or 0) }}</b></div>
       {% else %}<p class="hint">車両費は未登録です。</p>{% endfor %}
+    </div>
+    <div class="finance-chart">
+      <h3>ドライバー報酬合計</h3>
+      {% for row in dashboard.trend_rows %}
+      <div class="bar-row"><span>{{ row.month }}</span><div><i style="width: {{ (row.driver_reward_total / dashboard.chart_max_driver_reward * 100) if dashboard.chart_max_driver_reward else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.driver_reward_total or 0) }}</b></div>
+      {% endfor %}
+    </div>
+    <div class="finance-chart">
+      <h3>配達個数推移</h3>
+      {% for row in dashboard.trend_rows %}
+      <div class="bar-row"><span>{{ row.month }}</span><div><i style="width: {{ (row.delivery_count_total / dashboard.chart_max_delivery_count * 100) if dashboard.chart_max_delivery_count else 0 }}%"></i></div><b>{{ "{:,}".format(row.delivery_count_total or 0) }}個</b></div>
+      {% endfor %}
+    </div>
+    <div class="finance-chart">
+      <h3>粗利率推移</h3>
+      {% for row in dashboard.trend_rows %}
+      <div class="bar-row"><span>{{ row.month }}</span><div><i class="{{ 'neg' if row.gross_margin < 0 else '' }}" style="width: {{ ((row.gross_margin|abs) / dashboard.chart_max_margin * 100) if dashboard.chart_max_margin else 0 }}%"></i></div><b>{{ "{:.1f}".format(row.gross_margin or 0) }}%</b></div>
+      {% endfor %}
     </div>
   </div>
 </section>
