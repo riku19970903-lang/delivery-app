@@ -75,6 +75,42 @@
     </div>
   </section>
 
+  {% if feature_enabled('rewards') %}
+  <section class="admin-mobile-section finance-home-card">
+    <div class="section-head">
+      <div>
+        <p class="flow-eyebrow">{{ company_finance.target_label }}</p>
+        <h2>今月の会社収支</h2>
+      </div>
+      <form method="get" action="/admin" class="toolbar compact-toolbar">
+        <label>対象月<input type="month" name="finance_month" value="{{ company_finance.target_month }}"></label>
+        <button class="primary">表示</button>
+      </form>
+    </div>
+    <div class="finance-kpi-grid">
+      <div class="finance-kpi"><span>委託会社からの見込み売上</span><b>¥{{ "{:,.0f}".format(company_finance.revenue_total or 0) }}</b></div>
+      <div class="finance-kpi"><span>従業員支払い分</span><b>¥{{ "{:,.0f}".format(company_finance.driver_reward_total or 0) }}</b></div>
+      <div class="finance-kpi {{ 'profit-positive' if company_finance.gross_profit_before_costs >= 0 else 'profit-negative' }}"><span>粗利</span><b>¥{{ "{:,.0f}".format(company_finance.gross_profit_before_costs or 0) }}</b><small>粗利率 {{ "{:.1f}".format(company_finance.gross_margin_before_costs or 0) }}%</small></div>
+      <div class="finance-kpi"><span>車両管理費</span><b>¥{{ "{:,.0f}".format(company_finance.vehicle_expense_total or 0) }}</b></div>
+      <div class="finance-kpi"><span>その他費用</span><b>¥{{ "{:,.0f}".format(company_finance.other_expense_total or 0) }}</b></div>
+      <div class="finance-kpi {{ 'profit-positive' if company_finance.final_profit >= 0 else 'profit-negative' }}"><span>最終利益目安</span><b>¥{{ "{:,.0f}".format(company_finance.final_profit or 0) }}</b></div>
+    </div>
+    <div class="finance-line-chart" aria-label="今月の日別収支推移">
+      <svg viewBox="0 0 100 104" preserveAspectRatio="none">
+        {% for series in company_finance.chart_series %}
+        <polyline class="{{ series.class }}" points="{{ series.points }}"></polyline>
+        {% endfor %}
+      </svg>
+      <div class="finance-chart-legend">
+        {% for series in company_finance.chart_series %}
+        <span class="{{ series.class }}">{{ series.label }}</span>
+        {% endfor %}
+      </div>
+    </div>
+    <a class="button" href="/admin/finance?month={{ company_finance.target_month }}">月次収支の詳細を見る</a>
+  </section>
+  {% endif %}
+
   {% if feature_enabled('shifts') %}
   <section id="today-shifts" class="admin-mobile-section">
     <h2>拠点別 今日のみんなのシフト</h2>
@@ -247,6 +283,41 @@
       <a class="mobile-menu-item" href="/admin/settings"><span>設</span><b>設定</b></a>
     </div>
   </section>
+  {% if feature_enabled('rewards') %}
+  <section class="panel finance-home-card">
+    <div class="section-head">
+      <div>
+        <p class="flow-eyebrow">{{ company_finance.target_label }}</p>
+        <h2>今月の会社収支</h2>
+      </div>
+      <form method="get" action="/admin" class="toolbar compact-toolbar">
+        <label>対象月<input type="month" name="finance_month" value="{{ company_finance.target_month }}"></label>
+        <button class="primary">表示</button>
+      </form>
+    </div>
+    <div class="finance-kpi-grid">
+      <div class="finance-kpi"><span>委託会社からの見込み売上</span><b>¥{{ "{:,.0f}".format(company_finance.revenue_total or 0) }}</b></div>
+      <div class="finance-kpi"><span>従業員支払い分</span><b>¥{{ "{:,.0f}".format(company_finance.driver_reward_total or 0) }}</b></div>
+      <div class="finance-kpi {{ 'profit-positive' if company_finance.gross_profit_before_costs >= 0 else 'profit-negative' }}"><span>粗利</span><b>¥{{ "{:,.0f}".format(company_finance.gross_profit_before_costs or 0) }}</b><small>粗利率 {{ "{:.1f}".format(company_finance.gross_margin_before_costs or 0) }}%</small></div>
+      <div class="finance-kpi"><span>車両管理費</span><b>¥{{ "{:,.0f}".format(company_finance.vehicle_expense_total or 0) }}</b></div>
+      <div class="finance-kpi"><span>その他費用</span><b>¥{{ "{:,.0f}".format(company_finance.other_expense_total or 0) }}</b></div>
+      <div class="finance-kpi {{ 'profit-positive' if company_finance.final_profit >= 0 else 'profit-negative' }}"><span>最終利益目安</span><b>¥{{ "{:,.0f}".format(company_finance.final_profit or 0) }}</b></div>
+    </div>
+    <div class="finance-line-chart" aria-label="今月の日別収支推移">
+      <svg viewBox="0 0 100 104" preserveAspectRatio="none">
+        {% for series in company_finance.chart_series %}
+        <polyline class="{{ series.class }}" points="{{ series.points }}"></polyline>
+        {% endfor %}
+      </svg>
+      <div class="finance-chart-legend">
+        {% for series in company_finance.chart_series %}
+        <span class="{{ series.class }}">{{ series.label }}</span>
+        {% endfor %}
+      </div>
+    </div>
+    <a class="button" href="/admin/finance?month={{ company_finance.target_month }}">月次収支の詳細を見る</a>
+  </section>
+  {% endif %}
   <div class="grid stats">
     {% if feature_enabled('members') %}<div class="tile"><span>登録メンバー</span><strong>{{ member_count }}名</strong></div>{% endif %}
     {% if feature_enabled('safety') %}<div class="tile"><span>本日の点呼記録</span><strong>{{ log_count }}件</strong></div>{% endif %}

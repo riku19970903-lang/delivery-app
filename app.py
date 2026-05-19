@@ -2941,6 +2941,117 @@ def build_finance_dashboard(company_id: int, target_month: Optional[str]):
     }
 
 
+def svg_line_points(values, max_value: float):
+    max_value = max(float(max_value or 0), 1.0)
+    count = max(len(values), 1)
+    points = []
+    for index, value in enumerate(values):
+        x = 0 if count == 1 else index / (count - 1) * 100
+        y = 100 - min(max(float(value or 0), 0.0), max_value) / max_value * 92
+        points.append(f"{x:.2f},{y:.2f}")
+    return " ".join(points)
+
+
+def admin_finance_summary_for_month(company_id: int, target_month: Optional[str]):
+    start, end = month_bounds(target_month)
+    start_s, end_s = start.isoformat(), end.isoformat()
+    totals = finance_totals_for_period(company_id, start_s, end_s)
+    gross_profit = money_value(totals["revenue_total"]) - money_value(totals["driver_reward_total"])
+    final_profit = gross_profit - money_value(totals["vehicle_expense_total"]) - money_value(totals["other_expense_total"])
+    gross_margin = (gross_profit / money_value(totals["revenue_total"]) * 100) if money_value(totals["revenue_total"]) else 0.0
+
+    day_count = (end - start).days + 1
+    daily = {
+        (start + timedelta(days=offset)).isoformat(): {
+            "date": (start + timedelta(days=offset)).isoformat(),
+            "label": (start + timedelta(days=offset)).strftime("%-d") if os.name != "nt" else str((start + timedelta(days=offset)).day),
+            "revenue": 0.0,
+            "driver_reward": 0.0,
+            "gross_profit": 0.0,
+            "vehicle_expense": 0.0,
+            "other_expense": 0.0,
+        }
+        for offset in range(day_count)
+    }
+    deliveries = finance_delivery_rows(company_id, start_s, end_s, limit=2500)
+    rate_rows = finance_rate_rows(company_id, start_s, end_s)
+    monthly_vehicle_fees = {}
+    monthly_fee_days = {}
+    for row in deliveries:
+        work_date = row_value(row, "work_date", "")
+        if work_date not in daily:
+            continue
+        rate = depot_rate_for_delivery(rate_rows, int_value(row_value(row, "depot_id", 0)), work_date)
+        revenue = delivery_revenue_from_depot_rate(row, rate)
+        reward_rates = reward_rate_dict(row)
+        reward = calc_reward_gross(row, reward_rates)
+        if reward_rates["vehicle_rental_type"] == "daily":
+            reward -= reward_rates["vehicle_daily_fee"]
+        elif reward_rates["vehicle_rental_type"] == "monthly":
+            user_id = int_value(row_value(row, "user_id"))
+            monthly_vehicle_fees[user_id] = reward_rates["vehicle_monthly_fee"]
+            monthly_fee_days.setdefault(user_id, work_date)
+        daily[work_date]["revenue"] += revenue
+        daily[work_date]["driver_reward"] += reward
+    for user_id, fee in monthly_vehicle_fees.items():
+        fee_day = monthly_fee_days.get(user_id)
+        if fee_day in daily:
+            daily[fee_day]["driver_reward"] -= fee
+
+    vehicle_expense_rows = query_all(
+        """SELECT expense_date, COALESCE(SUM(amount), 0) AS total
+           FROM vehicle_expenses
+           WHERE company_id=? AND expense_date BETWEEN ? AND ?
+           GROUP BY expense_date LIMIT 40""",
+        (company_id, start_s, end_s),
+    )
+    for row in vehicle_expense_rows:
+        expense_date = row_value(row, "expense_date", "")
+        if expense_date in daily:
+            daily[expense_date]["vehicle_expense"] += money_value(row_value(row, "total", 0))
+
+    company_expense_rows = query_all(
+        """SELECT expense_date,
+                  COALESCE(SUM(CASE WHEN category=? THEN amount ELSE 0 END), 0) AS vehicle_total,
+                  COALESCE(SUM(CASE WHEN category<>? THEN amount ELSE 0 END), 0) AS other_total
+           FROM company_expenses
+           WHERE company_id=? AND expense_date BETWEEN ? AND ?
+           GROUP BY expense_date LIMIT 40""",
+        ("車両費", "車両費", company_id, start_s, end_s),
+    )
+    for row in company_expense_rows:
+        expense_date = row_value(row, "expense_date", "")
+        if expense_date in daily:
+            daily[expense_date]["vehicle_expense"] += money_value(row_value(row, "vehicle_total", 0))
+            daily[expense_date]["other_expense"] += money_value(row_value(row, "other_total", 0))
+
+    daily_rows = list(daily.values())
+    for row in daily_rows:
+        row["gross_profit"] = row["revenue"] - row["driver_reward"]
+    chart_max = max(
+        [money_value(row[key]) for row in daily_rows for key in ("revenue", "driver_reward", "gross_profit", "vehicle_expense", "other_expense")]
+        + [1]
+    )
+    chart_series = [
+        {"key": "revenue", "label": "売上", "class": "revenue", "points": svg_line_points([row["revenue"] for row in daily_rows], chart_max)},
+        {"key": "driver_reward", "label": "従業員支払い", "class": "driver", "points": svg_line_points([row["driver_reward"] for row in daily_rows], chart_max)},
+        {"key": "gross_profit", "label": "粗利", "class": "profit", "points": svg_line_points([max(row["gross_profit"], 0) for row in daily_rows], chart_max)},
+        {"key": "vehicle_expense", "label": "車両管理費", "class": "vehicle", "points": svg_line_points([row["vehicle_expense"] for row in daily_rows], chart_max)},
+        {"key": "other_expense", "label": "その他費用", "class": "other", "points": svg_line_points([row["other_expense"] for row in daily_rows], chart_max)},
+    ]
+    return {
+        **totals,
+        "target_month": start.strftime("%Y-%m"),
+        "target_label": f"{start.year}年{start.month}月",
+        "gross_profit_before_costs": gross_profit,
+        "final_profit": final_profit,
+        "gross_margin_before_costs": gross_margin,
+        "daily_rows": daily_rows,
+        "chart_series": chart_series,
+        "chart_max": chart_max,
+    }
+
+
 def vehicle_for_user(user, company_id: Optional[int] = None):
     company_id = company_id or company_id_for(user)
     vehicle_id = row_value(user, "last_vehicle_id")
@@ -4148,7 +4259,7 @@ def logout():
 
 
 @app.get("/admin", response_class=HTMLResponse)
-def admin_dashboard(request: Request, user=Depends(require_admin)):
+def admin_dashboard(request: Request, finance_month: Optional[str] = None, user=Depends(require_admin)):
     if is_platform_admin(user):
         total_companies = query_one("SELECT COUNT(*) AS count FROM companies")["count"]
         active_contracts = query_one(
@@ -4232,6 +4343,7 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
     tomorrow_s = (app_today() + timedelta(days=1)).isoformat()
     day_after_s = (app_today() + timedelta(days=2)).isoformat()
     company_id = company_id_for(user)
+    company_finance = admin_finance_summary_for_month(company_id, finance_month) if feature_enabled_for_company(company_id, "rewards") else None
     stats = query_one(
         """SELECT
              (SELECT COUNT(*) FROM users WHERE role='member' AND active=1 AND COALESCE(purged,0)=0 AND company_id=?) AS member_count,
@@ -4544,6 +4656,7 @@ def admin_dashboard(request: Request, user=Depends(require_admin)):
             "mobile_shift_days": shifts_by_mobile_day,
             "open_vehicle_issues": open_vehicle_issues,
             "priority_notifications": notifications,
+            "company_finance": company_finance,
         },
     )
 
