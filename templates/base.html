@@ -27,6 +27,11 @@
     {% endif %}
   </header>
   <main class="container">
+    {% if user and user.role == 'admin' and request.url.path != '/admin' %}
+    <div class="admin-backbar">
+      <a class="button" href="/admin">← 管理ホームへ戻る</a>
+    </div>
+    {% endif %}
     {% block content %}{% endblock %}
   </main>
   {% if user and user.role == 'member' and not hide_mobile_nav %}

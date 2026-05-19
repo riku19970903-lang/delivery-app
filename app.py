@@ -2810,7 +2810,8 @@ def reward_rate_dict(row):
     }
 
 
-def finance_totals_for_period(company_id: int, start_s: str, end_s: str):
+def finance_totals_for_period(company_id: int, start_s: str, end_s: str, selected_depot_id: int = 0):
+    selected_depot_id = int_value(selected_depot_id)
     deliveries = finance_delivery_rows(company_id, start_s, end_s)
     rate_rows = finance_rate_rows(company_id, start_s, end_s)
     revenue_total = 0.0
@@ -2820,6 +2821,8 @@ def finance_totals_for_period(company_id: int, start_s: str, end_s: str):
     depot_totals = {}
     for row in deliveries:
         depot_id = int_value(row_value(row, "depot_id", 0))
+        if selected_depot_id and depot_id != selected_depot_id:
+            continue
         depot_name = row_value(row, "depot_name", "") or "未設定拠点"
         rate = depot_rate_for_delivery(rate_rows, depot_id, row_value(row, "work_date", ""))
         revenue = delivery_revenue_from_depot_rate(row, rate)
@@ -2851,9 +2854,11 @@ def finance_totals_for_period(company_id: int, start_s: str, end_s: str):
     driver_reward_total -= sum(monthly_vehicle_fees.values())
     for depot in depot_totals.values():
         depot["gross_profit_before_costs"] = depot["revenue"] - depot["driver_reward"]
-    vehicle_expense = money_value(row_value(query_one("SELECT COALESCE(SUM(amount), 0) AS total FROM vehicle_expenses WHERE company_id=? AND expense_date BETWEEN ? AND ?", (company_id, start_s, end_s)), "total", 0))
-    company_vehicle_expense = money_value(row_value(query_one("SELECT COALESCE(SUM(amount), 0) AS total FROM company_expenses WHERE company_id=? AND category=? AND expense_date BETWEEN ? AND ?", (company_id, "車両費", start_s, end_s)), "total", 0))
-    other_expense = money_value(row_value(query_one("SELECT COALESCE(SUM(amount), 0) AS total FROM company_expenses WHERE company_id=? AND category<>? AND expense_date BETWEEN ? AND ?", (company_id, "車両費", start_s, end_s)), "total", 0))
+    depot_filter_sql = " AND COALESCE(depot_id,0)=?" if selected_depot_id else ""
+    depot_params = (selected_depot_id,) if selected_depot_id else ()
+    vehicle_expense = money_value(row_value(query_one(f"SELECT COALESCE(SUM(amount), 0) AS total FROM vehicle_expenses WHERE company_id=? AND expense_date BETWEEN ? AND ?{depot_filter_sql}", (company_id, start_s, end_s, *depot_params)), "total", 0))
+    company_vehicle_expense = money_value(row_value(query_one(f"SELECT COALESCE(SUM(amount), 0) AS total FROM company_expenses WHERE company_id=? AND category=? AND expense_date BETWEEN ? AND ?{depot_filter_sql}", (company_id, "車両費", start_s, end_s, *depot_params)), "total", 0))
+    other_expense = money_value(row_value(query_one(f"SELECT COALESCE(SUM(amount), 0) AS total FROM company_expenses WHERE company_id=? AND category<>? AND expense_date BETWEEN ? AND ?{depot_filter_sql}", (company_id, "車両費", start_s, end_s, *depot_params)), "total", 0))
     gross_profit = revenue_total - driver_reward_total - vehicle_expense - company_vehicle_expense - other_expense
     margin = (gross_profit / revenue_total * 100) if revenue_total else 0.0
     return {
@@ -2952,10 +2957,51 @@ def svg_line_points(values, max_value: float):
     return " ".join(points)
 
 
-def admin_finance_summary_for_month(company_id: int, target_month: Optional[str]):
+def finance_dashboard_summary(company_id: int, target_month: Optional[str], selected_depot_id: int = 0):
     start, end = month_bounds(target_month)
     start_s, end_s = start.isoformat(), end.isoformat()
-    totals = finance_totals_for_period(company_id, start_s, end_s)
+    selected_depot_id = int_value(selected_depot_id)
+    t0 = monotonic()
+    totals = finance_totals_for_period(company_id, start_s, end_s, selected_depot_id)
+    logger.info("monthly_summary_query_ms=%s company_id=%s month=%s depot_id=%s", elapsed_ms(t0), company_id, start.strftime("%Y-%m"), selected_depot_id)
+    rate_t0 = monotonic()
+    rate_count = int_value(row_value(query_one(
+        """SELECT COUNT(*) AS count FROM depot_rate_settings
+           WHERE company_id=? AND effective_start<=? AND (COALESCE(effective_end,'')='' OR effective_end>=?)""",
+        (company_id, end_s, start_s),
+    ), "count", 0))
+    logger.info("branch_rate_query_ms=%s company_id=%s month=%s", elapsed_ms(rate_t0), company_id, start.strftime("%Y-%m"))
+    vehicle_t0 = monotonic()
+    vehicle_cost_count = int_value(row_value(query_one(
+        """SELECT
+             (SELECT COUNT(*) FROM vehicle_expenses WHERE company_id=? AND expense_date BETWEEN ? AND ?) +
+             (SELECT COUNT(*) FROM company_expenses WHERE company_id=? AND category=? AND expense_date BETWEEN ? AND ?) AS count""",
+        (company_id, start_s, end_s, company_id, "車両費", start_s, end_s),
+    ), "count", 0))
+    logger.info("vehicle_cost_query_ms=%s company_id=%s month=%s", elapsed_ms(vehicle_t0), company_id, start.strftime("%Y-%m"))
+    gross_profit_before_costs = money_value(totals["revenue_total"]) - money_value(totals["driver_reward_total"])
+    final_profit = gross_profit_before_costs - money_value(totals["vehicle_expense_total"]) - money_value(totals["other_expense_total"])
+    gross_margin = (gross_profit_before_costs / money_value(totals["revenue_total"]) * 100) if money_value(totals["revenue_total"]) else 0.0
+    return {
+        **totals,
+        "target_month": start.strftime("%Y-%m"),
+        "target_label": f"{start.year}年{start.month}月",
+        "selected_depot_id": selected_depot_id,
+        "gross_profit_before_costs": gross_profit_before_costs,
+        "final_profit": final_profit,
+        "gross_margin_before_costs": gross_margin,
+        "has_depot_rates": rate_count > 0,
+        "has_vehicle_costs": vehicle_cost_count > 0,
+        "rate_missing": rate_count == 0 or money_value(totals["revenue_total"]) <= 0,
+        "vehicle_cost_missing": vehicle_cost_count == 0 or money_value(totals["vehicle_expense_total"]) <= 0,
+    }
+
+
+def admin_finance_summary_for_month(company_id: int, target_month: Optional[str], selected_depot_id: int = 0):
+    start, end = month_bounds(target_month)
+    start_s, end_s = start.isoformat(), end.isoformat()
+    selected_depot_id = int_value(selected_depot_id)
+    totals = finance_dashboard_summary(company_id, target_month, selected_depot_id)
     gross_profit = money_value(totals["revenue_total"]) - money_value(totals["driver_reward_total"])
     final_profit = gross_profit - money_value(totals["vehicle_expense_total"]) - money_value(totals["other_expense_total"])
     gross_margin = (gross_profit / money_value(totals["revenue_total"]) * 100) if money_value(totals["revenue_total"]) else 0.0
@@ -2973,6 +3019,7 @@ def admin_finance_summary_for_month(company_id: int, target_month: Optional[str]
         }
         for offset in range(day_count)
     }
+    t0 = monotonic()
     deliveries = finance_delivery_rows(company_id, start_s, end_s, limit=2500)
     rate_rows = finance_rate_rows(company_id, start_s, end_s)
     monthly_vehicle_fees = {}
@@ -2981,7 +3028,10 @@ def admin_finance_summary_for_month(company_id: int, target_month: Optional[str]
         work_date = row_value(row, "work_date", "")
         if work_date not in daily:
             continue
-        rate = depot_rate_for_delivery(rate_rows, int_value(row_value(row, "depot_id", 0)), work_date)
+        depot_id = int_value(row_value(row, "depot_id", 0))
+        if selected_depot_id and depot_id != selected_depot_id:
+            continue
+        rate = depot_rate_for_delivery(rate_rows, depot_id, work_date)
         revenue = delivery_revenue_from_depot_rate(row, rate)
         reward_rates = reward_rate_dict(row)
         reward = calc_reward_gross(row, reward_rates)
@@ -2999,11 +3049,11 @@ def admin_finance_summary_for_month(company_id: int, target_month: Optional[str]
             daily[fee_day]["driver_reward"] -= fee
 
     vehicle_expense_rows = query_all(
-        """SELECT expense_date, COALESCE(SUM(amount), 0) AS total
+        f"""SELECT expense_date, COALESCE(SUM(amount), 0) AS total
            FROM vehicle_expenses
-           WHERE company_id=? AND expense_date BETWEEN ? AND ?
+           WHERE company_id=? AND expense_date BETWEEN ? AND ?{" AND COALESCE(depot_id,0)=?" if selected_depot_id else ""}
            GROUP BY expense_date LIMIT 40""",
-        (company_id, start_s, end_s),
+        (company_id, start_s, end_s, selected_depot_id) if selected_depot_id else (company_id, start_s, end_s),
     )
     for row in vehicle_expense_rows:
         expense_date = row_value(row, "expense_date", "")
@@ -3011,13 +3061,13 @@ def admin_finance_summary_for_month(company_id: int, target_month: Optional[str]
             daily[expense_date]["vehicle_expense"] += money_value(row_value(row, "total", 0))
 
     company_expense_rows = query_all(
-        """SELECT expense_date,
+        f"""SELECT expense_date,
                   COALESCE(SUM(CASE WHEN category=? THEN amount ELSE 0 END), 0) AS vehicle_total,
                   COALESCE(SUM(CASE WHEN category<>? THEN amount ELSE 0 END), 0) AS other_total
            FROM company_expenses
-           WHERE company_id=? AND expense_date BETWEEN ? AND ?
+           WHERE company_id=? AND expense_date BETWEEN ? AND ?{" AND COALESCE(depot_id,0)=?" if selected_depot_id else ""}
            GROUP BY expense_date LIMIT 40""",
-        ("車両費", "車両費", company_id, start_s, end_s),
+        ("車両費", "車両費", company_id, start_s, end_s, selected_depot_id) if selected_depot_id else ("車両費", "車両費", company_id, start_s, end_s),
     )
     for row in company_expense_rows:
         expense_date = row_value(row, "expense_date", "")
@@ -3039,6 +3089,7 @@ def admin_finance_summary_for_month(company_id: int, target_month: Optional[str]
         {"key": "vehicle_expense", "label": "車両管理費", "class": "vehicle", "points": svg_line_points([row["vehicle_expense"] for row in daily_rows], chart_max)},
         {"key": "other_expense", "label": "その他費用", "class": "other", "points": svg_line_points([row["other_expense"] for row in daily_rows], chart_max)},
     ]
+    logger.info("monthly_chart_query_ms=%s company_id=%s month=%s depot_id=%s", elapsed_ms(t0), company_id, start.strftime("%Y-%m"), selected_depot_id)
     return {
         **totals,
         "target_month": start.strftime("%Y-%m"),
@@ -5834,21 +5885,48 @@ def save_depot_rate(
 
 
 @app.get("/admin/finance", response_class=HTMLResponse)
-def finance_dashboard_page(request: Request, user=Depends(require_admin)):
+def finance_dashboard_page(request: Request, month: Optional[str] = None, depot_id: int = 0, user=Depends(require_admin)):
+    page_start = monotonic()
     require_feature(user, "rewards")
     company_id = company_id_for(user)
-    target_month = request.query_params.get("month") or app_today().strftime("%Y-%m")
-    dashboard = build_finance_dashboard(company_id, target_month)
+    target_month = month or app_today().strftime("%Y-%m")
+    dashboard = finance_dashboard_summary(company_id, target_month, depot_id)
+    depots = depot_rows_for_company(company_id)
+    logger.info("monthly_dashboard_page_ms=%s company_id=%s month=%s depot_id=%s", elapsed_ms(page_start), company_id, dashboard["target_month"], int_value(depot_id))
     return render(
         request,
         "finance_dashboard.html",
         {
             "dashboard": dashboard,
-            "depots": depot_rows_for_company(company_id),
+            "depots": depots,
             "company_expense_categories": COMPANY_EXPENSE_CATEGORIES,
             "target_month": dashboard["target_month"],
+            "selected_depot_id": int_value(depot_id),
         },
     )
+
+
+@app.get("/admin/monthly_dashboard", response_class=HTMLResponse)
+def monthly_dashboard_alias(month: Optional[str] = None, depot_id: int = 0, user=Depends(require_admin)):
+    query = f"?month={quote(month)}" if month else ""
+    if depot_id:
+        query += ("&" if query else "?") + f"depot_id={depot_id}"
+    return RedirectResponse("/admin/finance" + query, status_code=303)
+
+
+@app.get("/admin/finance/chart")
+def finance_dashboard_chart(month: Optional[str] = None, depot_id: int = 0, user=Depends(require_admin)):
+    require_feature(user, "rewards")
+    company_id = company_id_for(user)
+    chart = admin_finance_summary_for_month(company_id, month or app_today().strftime("%Y-%m"), depot_id)
+    return {
+        "target_month": chart["target_month"],
+        "target_label": chart["target_label"],
+        "selected_depot_id": int_value(depot_id),
+        "chart_series": chart["chart_series"],
+        "daily_rows": chart["daily_rows"],
+        "chart_max": chart["chart_max"],
+    }
 
 
 @app.post("/admin/company-expenses")

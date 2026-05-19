@@ -8,18 +8,70 @@
   <a class="button" href="/rewards">報酬確認</a>
 </section>
 
-<section class="panel">
-  <form method="get" action="/admin/finance" class="toolbar compact-toolbar">
-    <label>対象月 <input type="month" name="month" value="{{ target_month }}"></label>
-    <button class="primary">表示</button>
-  </form>
+<section class="panel finance-home-card">
+  <div class="section-head">
+    <div>
+      <p class="flow-eyebrow">{{ dashboard.target_label }}</p>
+      <h2>月次収支</h2>
+    </div>
+    <form method="get" action="/admin/finance" class="toolbar compact-toolbar">
+      <label>対象月<input type="month" name="month" value="{{ target_month }}"></label>
+      <input type="hidden" name="depot_id" value="{{ selected_depot_id }}">
+      <button class="primary">表示</button>
+    </form>
+  </div>
+
+  <div class="depot-filter">
+    <a class="{{ 'active' if not selected_depot_id else '' }}" href="/admin/finance?month={{ target_month }}">全拠点</a>
+    {% for depot in depots %}
+    <a class="{{ 'active' if selected_depot_id == depot.id else '' }}" href="/admin/finance?month={{ target_month }}&depot_id={{ depot.id }}">{{ depot.name }}</a>
+    {% endfor %}
+  </div>
+
+  {% if dashboard.rate_missing %}
+  <div class="admin-alert-card yellow">
+    <b>単価未入力</b>
+    <span>グラフを表示するためには、各拠点の単価を入力してください。</span>
+    <a class="button" href="/admin/depot-rates">拠点単価を設定する</a>
+  </div>
+  {% endif %}
+  {% if dashboard.vehicle_cost_missing %}
+  <div class="admin-alert-card yellow">
+    <b>車両費未入力</b>
+    <span>車両にかかる費用を入力すると、さらに詳しく会社の情報を表示できます。</span>
+    <a class="button" href="/admin/vehicles">車両費を入力する</a>
+  </div>
+  {% endif %}
+
   <div class="finance-kpi-grid">
-    <div class="finance-kpi"><span>拠点からの売上</span><b>¥{{ "{:,.0f}".format(dashboard.revenue_total or 0) }}</b><small>前月比 ¥{{ "{:,.0f}".format(dashboard.revenue_mom or 0) }}</small></div>
-    <div class="finance-kpi"><span>配達完了数</span><b>{{ "{:,}".format(dashboard.delivery_count_total or 0) }}個</b><small>完了数ベース</small></div>
-    <div class="finance-kpi"><span>ドライバー報酬</span><b>¥{{ "{:,.0f}".format(dashboard.driver_reward_total or 0) }}</b><small>個人単価から概算</small></div>
-    <div class="finance-kpi"><span>車両費</span><b>¥{{ "{:,.0f}".format(dashboard.vehicle_expense_total or 0) }}</b><small>車両費入力分</small></div>
-    <div class="finance-kpi"><span>その他費用</span><b>¥{{ "{:,.0f}".format(dashboard.other_expense_total or 0) }}</b><small>会社費用入力分</small></div>
-    <div class="finance-kpi {{ 'profit-positive' if dashboard.gross_profit >= 0 else 'profit-negative' }}"><span>粗利</span><b>¥{{ "{:,.0f}".format(dashboard.gross_profit or 0) }}</b><small>粗利率 {{ "{:.1f}".format(dashboard.gross_margin or 0) }}%</small></div>
+    <div class="finance-kpi"><span>拠点からの売上</span><b>¥{{ "{:,.0f}".format(dashboard.revenue_total or 0) }}</b><small>{% if dashboard.rate_missing %}単価未入力の可能性あり{% else %}対象月のみ集計{% endif %}</small></div>
+    <div class="finance-kpi"><span>従業員支払額</span><b>¥{{ "{:,.0f}".format(dashboard.driver_reward_total or 0) }}</b><small>メンバー別単価から計算</small></div>
+    <div class="finance-kpi {{ 'profit-positive' if dashboard.gross_profit_before_costs >= 0 else 'profit-negative' }}"><span>粗利</span><b>¥{{ "{:,.0f}".format(dashboard.gross_profit_before_costs or 0) }}</b><small>粗利率 {{ "{:.1f}".format(dashboard.gross_margin_before_costs or 0) }}%</small></div>
+    <div class="finance-kpi"><span>車両管理費</span><b>¥{{ "{:,.0f}".format(dashboard.vehicle_expense_total or 0) }}</b><small>{% if dashboard.vehicle_cost_missing %}車両費未入力{% else %}入力済み{% endif %}</small></div>
+    <div class="finance-kpi"><span>その他費用</span><b>¥{{ "{:,.0f}".format(dashboard.other_expense_total or 0) }}</b><small>会社費用から集計</small></div>
+    <div class="finance-kpi {{ 'profit-positive' if dashboard.final_profit >= 0 else 'profit-negative' }}"><span>最終利益目安</span><b>¥{{ "{:,.0f}".format(dashboard.final_profit or 0) }}</b><small>粗利 - 車両費 - その他費用</small></div>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="section-head">
+    <div>
+      <h2>日別推移グラフ</h2>
+      <p class="hint">グラフは後から読み込みます。チェックを変えても画面全体は再読み込みしません。</p>
+    </div>
+    <button type="button" class="button primary" id="finance-load-chart">グラフを表示</button>
+  </div>
+  <div class="finance-check-grid" id="finance-chart-options">
+    <label class="check"><input type="checkbox" value="revenue" checked> 拠点からの売上</label>
+    <label class="check"><input type="checkbox" value="driver_reward" checked> 従業員支払額</label>
+    <label class="check"><input type="checkbox" value="gross_profit" checked> 粗利</label>
+    <label class="check"><input type="checkbox" value="vehicle_expense"> 車両管理費</label>
+    <label class="check"><input type="checkbox" value="other_expense"> その他費用</label>
+  </div>
+  <div id="finance-chart-status" class="hint">グラフ読み込み中...</div>
+  <div class="finance-line-chart" id="finance-chart" data-month="{{ target_month }}" data-depot-id="{{ selected_depot_id }}" hidden>
+    <svg viewBox="0 0 100 104" preserveAspectRatio="none"></svg>
+    <div class="finance-chart-legend"></div>
   </div>
 </section>
 
@@ -37,72 +89,18 @@
         <span>集荷 {{ depot.pickup }}</span>
         <span>大型 {{ depot.large }}</span>
       </div>
-      <p class="hint">ドライバー報酬 ¥{{ "{:,.0f}".format(depot.driver_reward or 0) }}</p>
+      <p class="hint">従業員支払 ¥{{ "{:,.0f}".format(depot.driver_reward or 0) }}</p>
     </article>
     {% else %}
-    <p>この月の配達実績がまだありません。</p>
+    <p>この月の配達実績はまだありません。</p>
     {% endfor %}
-  </div>
-</section>
-
-<section class="panel">
-  <h2>グラフ</h2>
-  <div class="finance-chart-grid">
-    <div class="finance-chart">
-      <h3>月別売上推移</h3>
-      {% for row in dashboard.trend_rows %}
-      <div class="bar-row"><span>{{ row.month }}</span><div><i style="width: {{ (row.revenue_total / dashboard.chart_max_revenue * 100) if dashboard.chart_max_revenue else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.revenue_total or 0) }}</b></div>
-      {% endfor %}
-    </div>
-    <div class="finance-chart">
-      <h3>月別粗利推移</h3>
-      {% for row in dashboard.trend_rows %}
-      <div class="bar-row"><span>{{ row.month }}</span><div><i class="{{ 'neg' if row.gross_profit < 0 else '' }}" style="width: {{ ((row.gross_profit|abs) / dashboard.chart_max_profit * 100) if dashboard.chart_max_profit else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.gross_profit or 0) }}</b></div>
-      {% endfor %}
-    </div>
-    <div class="finance-chart">
-      <h3>拠点別売上</h3>
-      {% for row in dashboard.depot_rows %}
-      <div class="bar-row"><span>{{ row.depot_name }}</span><div><i style="width: {{ (row.revenue / dashboard.chart_max_depot_revenue * 100) if dashboard.chart_max_depot_revenue else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.revenue or 0) }}</b></div>
-      {% else %}<p class="hint">拠点別売上はまだありません。</p>{% endfor %}
-    </div>
-    <div class="finance-chart">
-      <h3>車両費カテゴリー別</h3>
-      {% for row in dashboard.vehicle_category_rows %}
-      <div class="bar-row"><span>{{ row.category }}</span><div><i style="width: {{ (row.total / dashboard.chart_max_vehicle_category * 100) if dashboard.chart_max_vehicle_category else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.total or 0) }}</b></div>
-      {% else %}<p class="hint">車両費は未登録です。</p>{% endfor %}
-    </div>
-    <div class="finance-chart">
-      <h3>車両ごとの費用ランキング</h3>
-      {% for row in dashboard.vehicle_rank_rows %}
-      <div class="bar-row"><span>{{ row.vehicle_name }}</span><div><i style="width: {{ (row.total / dashboard.chart_max_vehicle_rank * 100) if dashboard.chart_max_vehicle_rank else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.total or 0) }}</b></div>
-      {% else %}<p class="hint">車両費は未登録です。</p>{% endfor %}
-    </div>
-    <div class="finance-chart">
-      <h3>ドライバー報酬合計</h3>
-      {% for row in dashboard.trend_rows %}
-      <div class="bar-row"><span>{{ row.month }}</span><div><i style="width: {{ (row.driver_reward_total / dashboard.chart_max_driver_reward * 100) if dashboard.chart_max_driver_reward else 0 }}%"></i></div><b>¥{{ "{:,.0f}".format(row.driver_reward_total or 0) }}</b></div>
-      {% endfor %}
-    </div>
-    <div class="finance-chart">
-      <h3>配達個数推移</h3>
-      {% for row in dashboard.trend_rows %}
-      <div class="bar-row"><span>{{ row.month }}</span><div><i style="width: {{ (row.delivery_count_total / dashboard.chart_max_delivery_count * 100) if dashboard.chart_max_delivery_count else 0 }}%"></i></div><b>{{ "{:,}".format(row.delivery_count_total or 0) }}個</b></div>
-      {% endfor %}
-    </div>
-    <div class="finance-chart">
-      <h3>粗利率推移</h3>
-      {% for row in dashboard.trend_rows %}
-      <div class="bar-row"><span>{{ row.month }}</span><div><i class="{{ 'neg' if row.gross_margin < 0 else '' }}" style="width: {{ ((row.gross_margin|abs) / dashboard.chart_max_margin * 100) if dashboard.chart_max_margin else 0 }}%"></i></div><b>{{ "{:.1f}".format(row.gross_margin or 0) }}%</b></div>
-      {% endfor %}
-    </div>
   </div>
 </section>
 
 <section class="panel">
   <h2>会社費用を入力</h2>
   <form method="post" action="/admin/company-expenses" enctype="multipart/form-data" class="formgrid" onsubmit="return confirm('この費用を登録します。よろしいですか？')">
-    <label>日付 <input type="date" name="expense_date" value="{{ today }}" required></label>
+    <label>日付<input type="date" name="expense_date" value="{{ today }}" required></label>
     <label>拠点
       <select name="depot_id">
         <option value="0">未設定</option>
@@ -114,31 +112,81 @@
         {% for category in company_expense_categories %}<option value="{{ category }}">{{ category }}</option>{% endfor %}
       </select>
     </label>
-    <label>金額 <input type="number" step="1" min="0" name="amount" required placeholder="例：12000"></label>
+    <label>金額<input type="number" step="1" min="0" name="amount" required placeholder="例：12000"></label>
     <label>支払先 <input name="payee" placeholder="例：駐車場管理会社"></label>
-    <label class="wide-field">メモ <input name="memo" placeholder="例：5月分駐車場代"></label>
-    <label class="wide-field">領収書画像 任意 <input type="file" name="receipt" accept="image/*"></label>
+    <label class="wide-field">メモ <input name="memo" placeholder="例：月極駐車場代"></label>
+    <label class="wide-field">領収書画像 任意<input type="file" name="receipt" accept="image/*"></label>
     <button class="primary">費用を登録</button>
   </form>
 </section>
 
-<section class="panel tablewrap">
-  <h2>今月の会社費用 最新50件</h2>
-  <table>
-    <tr><th>日付</th><th>拠点</th><th>カテゴリー</th><th>金額</th><th>支払先</th><th>領収書</th><th>メモ</th></tr>
-    {% for e in dashboard.company_expense_rows %}
-    <tr>
-      <td>{{ e.expense_date }}</td>
-      <td>{{ e.depot_name or "未設定" }}</td>
-      <td>{{ e.category }}</td>
-      <td>¥{{ "{:,.0f}".format(e.amount or 0) }}</td>
-      <td>{{ e.payee or "-" }}</td>
-      <td>{% if e.receipt_path %}<a class="mini-button" href="{{ e.receipt_path }}" target="_blank">画像</a>{% else %}なし{% endif %}</td>
-      <td>{{ e.memo or "" }}</td>
-    </tr>
-    {% else %}
-    <tr><td colspan="7">会社費用は未登録です。</td></tr>
-    {% endfor %}
-  </table>
-</section>
+<script>
+(function(){
+  const chartBox = document.getElementById("finance-chart");
+  const status = document.getElementById("finance-chart-status");
+  const loadButton = document.getElementById("finance-load-chart");
+  const options = document.getElementById("finance-chart-options");
+  if (!chartBox || !status || !loadButton || !options) return;
+  let chartData = null;
+  const labels = {
+    revenue: "拠点からの売上",
+    driver_reward: "従業員支払額",
+    gross_profit: "粗利",
+    vehicle_expense: "車両管理費",
+    other_expense: "その他費用"
+  };
+  const classes = {
+    revenue: "revenue",
+    driver_reward: "driver",
+    gross_profit: "profit",
+    vehicle_expense: "vehicle",
+    other_expense: "other"
+  };
+  function selectedKeys(){
+    return Array.from(options.querySelectorAll("input:checked")).map((input) => input.value);
+  }
+  function renderChart(){
+    if (!chartData) return;
+    const svg = chartBox.querySelector("svg");
+    const legend = chartBox.querySelector(".finance-chart-legend");
+    svg.innerHTML = "";
+    legend.innerHTML = "";
+    selectedKeys().forEach((key) => {
+      const series = chartData.chart_series.find((item) => item.key === key);
+      if (!series) return;
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+      line.setAttribute("class", classes[key] || series.class);
+      line.setAttribute("points", series.points);
+      svg.appendChild(line);
+      const label = document.createElement("span");
+      label.className = classes[key] || series.class;
+      label.textContent = labels[key] || series.label;
+      legend.appendChild(label);
+    });
+    chartBox.hidden = false;
+    status.textContent = "";
+  }
+  async function loadChart(){
+    status.textContent = "グラフ読み込み中...";
+    loadButton.disabled = true;
+    try {
+      const month = encodeURIComponent(chartBox.dataset.month || "");
+      const depotId = encodeURIComponent(chartBox.dataset.depotId || "0");
+      const response = await fetch(`/admin/finance/chart?month=${month}&depot_id=${depotId}`, {headers: {"Accept": "application/json"}});
+      if (!response.ok) throw new Error("chart failed");
+      chartData = await response.json();
+      renderChart();
+      loadButton.textContent = "グラフ更新";
+    } catch (error) {
+      status.textContent = "グラフを読み込めませんでした。時間をおいて再度お試しください。";
+      loadButton.disabled = false;
+      return;
+    }
+    loadButton.disabled = false;
+  }
+  loadButton.addEventListener("click", loadChart);
+  options.addEventListener("change", renderChart);
+  status.textContent = "グラフは必要な時だけ読み込みます。";
+})();
+</script>
 {% endblock %}
