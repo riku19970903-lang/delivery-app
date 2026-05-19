@@ -29,7 +29,7 @@
   <main class="container">
     {% block content %}{% endblock %}
   </main>
-  {% if user and user.role == 'member' %}
+  {% if user and user.role == 'member' and not hide_mobile_nav %}
   <nav class="mobile-bottom-nav" aria-label="スマホ下部メニュー">
     <a href="/member"><span>⌂</span><b>ホーム</b></a>
     {% if feature_enabled('safety') and feature_enabled('deliveries') %}

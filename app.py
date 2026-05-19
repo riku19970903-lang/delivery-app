@@ -38,7 +38,7 @@ if DATABASE_URL.startswith("postgres://"):
 USE_POSTGRES = bool(DATABASE_URL)
 DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "3"))
 DB_INIT_RETRY_SECONDS = int(os.getenv("DB_INIT_RETRY_SECONDS", "30"))
-SCHEMA_VERSION = "2026-05-10-member-results-v1"
+SCHEMA_VERSION = "2026-05-19-start-work-speed-v1"
 DB_INIT_ON_STARTUP = os.getenv("DB_INIT_ON_STARTUP", "0" if USE_POSTGRES else "1").lower() in {"1", "true", "yes", "on"}
 APP_NAME = "SPARKLE DRIVE"
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -94,6 +94,10 @@ DB_INIT_DONE = False
 DB_INIT_ERROR = None
 DB_INIT_LAST_ATTEMPT = 0.0
 FEATURE_CACHE = {}
+
+
+def elapsed_ms(start: float) -> float:
+    return round((monotonic() - start) * 1000, 1)
 FEATURE_CACHE_TTL_SECONDS = int(os.getenv("FEATURE_CACHE_TTL_SECONDS", "30"))
 SCHEMA_REQUIRED_COLUMNS = {
     "companies": ("id", "name", "status", "next_renewal_date"),
@@ -1668,6 +1672,11 @@ def _init_db_schema():
         for index_sql in (
             "CREATE INDEX IF NOT EXISTS idx_work_log_sessions_company_date_user ON work_log_sessions(company_id, work_date, user_id)",
             "CREATE INDEX IF NOT EXISTS idx_work_log_sessions_open ON work_log_sessions(company_id, work_date, status)",
+            "CREATE INDEX IF NOT EXISTS idx_work_log_sessions_start_lookup ON work_log_sessions(company_id, user_id, work_date, status)",
+            "CREATE INDEX IF NOT EXISTS idx_work_logs_company_user_date ON work_logs(company_id, user_id, work_date)",
+            "CREATE INDEX IF NOT EXISTS idx_work_logs_company_user_vehicle ON work_logs(company_id, user_id, vehicle_id)",
+            "CREATE INDEX IF NOT EXISTS idx_shifts_company_user_date ON shifts(company_id, user_id, shift_date)",
+            "CREATE INDEX IF NOT EXISTS idx_vehicles_company_active_id ON vehicles(company_id, active, id)",
             "CREATE INDEX IF NOT EXISTS idx_work_log_corrections_company_changed ON work_log_corrections(company_id, changed_at)",
             "CREATE INDEX IF NOT EXISTS idx_work_day_deletions_company_date ON work_day_deletions(company_id, work_date)",
             "CREATE INDEX IF NOT EXISTS idx_vehicle_expenses_company_month ON vehicle_expenses(company_id, expense_date)",
@@ -2956,6 +2965,71 @@ def selected_vehicle_context(user):
     return vehicles, selected
 
 
+def start_work_open_session(company_id: int, user_id: int, work_date: str):
+    return query_one(
+        """SELECT id, session_no FROM work_log_sessions
+           WHERE company_id=? AND user_id=? AND work_date=? AND status='working' AND COALESCE(is_deleted,0)=0
+           ORDER BY id DESC LIMIT 1""",
+        (company_id, user_id, work_date),
+    )
+
+
+def start_work_shift_context(company_id: int, user_id: int, work_date: str):
+    shift = query_one(
+        """SELECT s.status, s.start_time, s.end_time, s.note, s.area_label,
+                  d.name AS district_name, t.name AS town_name
+           FROM shifts s
+           LEFT JOIN districts d ON d.id=s.district_id AND d.company_id=s.company_id
+           LEFT JOIN towns t ON t.id=s.town_id AND t.company_id=s.company_id
+           WHERE s.company_id=? AND s.user_id=? AND s.shift_date=? AND s.decided=1
+           LIMIT 1""",
+        (company_id, user_id, work_date),
+    )
+    if not shift:
+        return {"status": "未定", "area_text": "本日のシフト未定", "time_text": "", "note": ""}
+    area = row_value(shift, "area_label", "") or row_value(shift, "town_name", "") or row_value(shift, "district_name", "") or "配達エリア未設定"
+    start = row_value(shift, "start_time", "") or ""
+    end = row_value(shift, "end_time", "") or ""
+    time_text = f"{start}〜{end}" if start or end else ""
+    return {**dict(shift), "area_text": area, "time_text": time_text}
+
+
+def start_work_vehicle_context(user, company_id: int):
+    selected = None
+    vehicle_id = int_value(row_value(user, "last_vehicle_id", 0))
+    vehicle_name = (row_value(user, "vehicle", "") or "").strip()
+    if vehicle_id:
+        selected = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=? AND active=1", (vehicle_id, company_id))
+    if not selected and vehicle_name:
+        selected = query_one("SELECT * FROM vehicles WHERE company_id=? AND name=? AND active=1", (company_id, vehicle_name))
+    selected_id = int_value(row_value(selected, "id", 0))
+    vehicles = query_all(
+        """SELECT * FROM vehicles
+           WHERE company_id=? AND active=1
+           ORDER BY CASE WHEN id=? THEN 0 WHEN name=? THEN 1 ELSE 2 END, name
+           LIMIT 12""",
+        (company_id, selected_id, vehicle_name),
+    )
+    if not selected and vehicles:
+        selected = vehicles[0]
+    elif selected and not any(int_value(row_value(vehicle, "id")) == selected_id for vehicle in vehicles):
+        vehicles = [selected] + vehicles[:11]
+    return vehicles, selected
+
+
+def start_work_last_odometer(company_id: int, user_id: int, vehicle):
+    vehicle_odo = int_value(row_value(vehicle, "last_odometer", 0))
+    if vehicle_odo:
+        return vehicle_odo
+    row = query_one(
+        """SELECT odometer FROM work_logs
+           WHERE company_id=? AND user_id=? AND COALESCE(odometer, 0)>0 AND COALESCE(is_deleted,0)=0
+           ORDER BY work_date DESC, logged_at DESC LIMIT 1""",
+        (company_id, user_id),
+    )
+    return int_value(row_value(row, "odometer", 0))
+
+
 def latest_vehicle_odometer(company_id: int, vehicle_id: Optional[int]):
     if not vehicle_id:
         return 0
@@ -3040,7 +3114,7 @@ def open_work_session(company_id: int, user_id: int, work_date: str):
 
 def next_work_session_no(conn, company_id: int, user_id: int, work_date: str):
     row = conn.execute(
-        "SELECT COALESCE(MAX(session_no), 0) AS max_no FROM work_log_sessions WHERE company_id=? AND user_id=? AND work_date=?",
+        "SELECT COALESCE(MAX(session_no), 0) AS max_no FROM work_log_sessions WHERE company_id=? AND user_id=? AND work_date=? AND COALESCE(is_deleted,0)=0",
         (company_id, user_id, work_date),
     ).fetchone()
     return int_value(row["max_no"]) + 1
@@ -5888,19 +5962,42 @@ def save_work_log(
 
 @app.get("/mobile/work/start", response_class=HTMLResponse)
 def mobile_work_start_page(request: Request, user=Depends(require_user)):
+    route_started = monotonic()
     require_feature(user, "safety")
     if user["role"] == "admin":
         return RedirectResponse("/admin", status_code=303)
     company_id = company_id_for(user)
     today_s = app_today().isoformat()
-    state = today_work_state(user["id"], company_id, today_s)
-    if state["status"] == "working":
-        return RedirectResponse("/member", status_code=303)
+    open_started = monotonic()
+    open_session = start_work_open_session(company_id, user["id"], today_s)
+    open_ms = elapsed_ms(open_started)
+    if open_session:
+        logger.warning("start_work_page_ms=%s start_work_open_session_query_ms=%s already_working=1", elapsed_ms(route_started), open_ms)
+        return RedirectResponse("/mobile/work/start/complete", status_code=303)
     now_dt = app_now()
-    vehicles, selected_vehicle = selected_vehicle_context(user)
+    vehicle_started = monotonic()
+    vehicles, selected_vehicle = start_work_vehicle_context(user, company_id)
+    vehicle_ms = elapsed_ms(vehicle_started)
+    shift_started = monotonic()
+    today_shift = start_work_shift_context(company_id, user["id"], today_s)
+    shift_ms = elapsed_ms(shift_started)
+    next_started = monotonic()
     next_no = query_one(
-        "SELECT COALESCE(MAX(session_no), 0) + 1 AS next_no FROM work_log_sessions WHERE company_id=? AND user_id=? AND work_date=?",
+        "SELECT COALESCE(MAX(session_no), 0) + 1 AS next_no FROM work_log_sessions WHERE company_id=? AND user_id=? AND work_date=? AND COALESCE(is_deleted,0)=0",
         (company_id, user["id"], today_s),
+    )
+    next_ms = elapsed_ms(next_started)
+    odometer_started = monotonic()
+    last_odometer = start_work_last_odometer(company_id, user["id"], selected_vehicle)
+    odometer_ms = elapsed_ms(odometer_started)
+    logger.warning(
+        "start_work_page_ms=%s start_work_open_session_query_ms=%s start_work_vehicle_query_ms=%s start_work_shift_query_ms=%s start_work_next_session_query_ms=%s start_work_odometer_query_ms=%s",
+        elapsed_ms(route_started),
+        open_ms,
+        vehicle_ms,
+        shift_ms,
+        next_ms,
+        odometer_ms,
     )
     return render(
         request,
@@ -5908,12 +6005,14 @@ def mobile_work_start_page(request: Request, user=Depends(require_user)):
         {
             "work_date": today_s,
             "logged_at": now_dt.strftime("%Y-%m-%dT%H:%M"),
-            "last_odometer": latest_vehicle_odometer(company_id, row_value(selected_vehicle, "id")) or latest_odometer_for_user(user["id"], company_id),
+            "last_odometer": last_odometer,
             "vehicle_name": vehicle_label(selected_vehicle),
             "vehicles": vehicles,
             "selected_vehicle": selected_vehicle,
+            "today_shift": today_shift,
             "session_no": row_value(next_no, "next_no", 1),
-            "is_restart": state["status"] == "finished",
+            "is_restart": int_value(row_value(next_no, "next_no", 1)) > 1,
+            "hide_mobile_nav": True,
         },
     )
 
@@ -5933,16 +6032,22 @@ def mobile_work_start(
     require_feature(user, "safety")
     if user["role"] == "admin":
         raise HTTPException(status_code=403, detail="メンバーとしてログインしてください")
+    route_started = monotonic()
     company_id = company_id_for(user)
-    state = today_work_state(user["id"], company_id, work_date)
-    if state["status"] == "working":
-        return RedirectResponse("/member", status_code=303)
+    open_started = monotonic()
+    if start_work_open_session(company_id, user["id"], work_date):
+        logger.warning("start_work_save_ms=%s start_work_open_session_query_ms=%s already_working=1", elapsed_ms(route_started), elapsed_ms(open_started))
+        return RedirectResponse("/mobile/work/start/complete", status_code=303)
+    open_ms = elapsed_ms(open_started)
+    vehicle_started = monotonic()
     vehicle = query_one("SELECT * FROM vehicles WHERE id=? AND company_id=? AND active=1", (vehicle_id, company_id)) if vehicle_id else None
+    vehicle_ms = elapsed_ms(vehicle_started)
     vehicle_name = vehicle_label(vehicle) if vehicle else (row_value(user, "vehicle", "") or "")
     logged_at = logged_at or app_now().strftime("%Y-%m-%dT%H:%M")
     vehicle_note = f"車両: {vehicle_name or '未登録'}"
     notes = " / ".join(part for part in [vehicle_note, notes.strip()] if part)
     now = app_now().isoformat(timespec="seconds")
+    db_started = monotonic()
     with db() as conn:
         open_session = conn.execute(
             """SELECT id FROM work_log_sessions
@@ -5951,9 +6056,12 @@ def mobile_work_start(
             (company_id, user["id"], work_date),
         ).fetchone()
         if open_session:
-            return RedirectResponse("/member", status_code=303)
+            logger.warning("start_work_save_ms=%s start_work_vehicle_query_ms=%s start_work_db_write_ms=%s already_working=1", elapsed_ms(route_started), vehicle_ms, elapsed_ms(db_started))
+            return RedirectResponse("/mobile/work/start/complete", status_code=303)
         session_no = next_work_session_no(conn, company_id, user["id"], work_date)
-        start_odo, end_odo, distance_km = odometer_log_values(conn, company_id, user["id"], work_date, "start", odometer)
+        start_odo = max(odometer, 0)
+        end_odo = 0
+        distance_km = 0
         cur = conn.execute(
             """INSERT INTO work_logs(company_id, user_id, work_date, log_type, logged_at, vehicle_id, vehicle_name, odometer,
                start_odometer, end_odometer, distance_km, alcohol_result, detector_used,
@@ -6029,6 +6137,13 @@ def mobile_work_start(
             conn=conn,
         )
         conn.commit()
+    logger.warning(
+        "start_work_save_ms=%s start_work_open_session_query_ms=%s start_work_vehicle_query_ms=%s start_work_db_write_ms=%s",
+        elapsed_ms(route_started),
+        open_ms,
+        vehicle_ms,
+        elapsed_ms(db_started),
+    )
     return RedirectResponse("/mobile/work/start/complete", status_code=303)
 
 
@@ -6037,7 +6152,7 @@ def mobile_work_start_complete(request: Request, user=Depends(require_user)):
     require_feature(user, "safety")
     if user["role"] == "admin":
         return RedirectResponse("/admin", status_code=303)
-    return render(request, "mobile_work_start_complete.html", {})
+    return render(request, "mobile_work_start_complete.html", {"hide_mobile_nav": True})
 
 
 @app.get("/mobile/work/end", response_class=HTMLResponse)
