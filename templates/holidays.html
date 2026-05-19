@@ -1,11 +1,27 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>来月の休み希望{{ "一覧" if user.role == "admin" else "入力" }}</h1>
+{% if error %}<p class="alert">{{ error }}</p>{% endif %}
+{% if message %}<p class="success">{{ message }}</p>{% endif %}
 {% if holiday_alert and holiday_alert.message %}
 <p class="alert">{{ holiday_alert.message }}</p>
 {% endif %}
 
 {% if user.role != 'admin' %}
+<section class="panel">
+  <h2>休み希望ルール</h2>
+  <p class="hint">毎月{{ holiday_rule.deadline_day }}日までに休み希望を入力してください。</p>
+  {% if holiday_rule.limit_unlimited %}
+  <p>今月の休み希望：{{ selected_count }}日 / 制限なし</p>
+  {% else %}
+  <p>今月の休み希望：{{ selected_count }}日 / 上限{{ holiday_rule.limit_days }}日</p>
+  {% if remaining_days and remaining_days > 0 %}
+  <p class="success">あと{{ remaining_days }}日まで入力できます。</p>
+  {% else %}
+  <p class="alert">上限に達しています。追加する場合は選択日数を減らすか管理者に相談してください。</p>
+  {% endif %}
+  {% endif %}
+</section>
 <form method="post" class="panel formgrid"><label>希望日<input type="date" name="request_date" required></label><label>理由・メモ<input name="reason"></label><button class="primary">希望を出す</button></form>
 <section class="panel tablewrap"><table><tr><th>希望日</th><th>理由</th></tr>
 {% for r in rows %}<tr><td>{{ r.request_date }}</td><td>{{ r.reason }}</td></tr>{% else %}<tr><td colspan="2">まだありません。</td></tr>{% endfor %}

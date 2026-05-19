@@ -20,7 +20,7 @@
       <a href="/support-requests">要望送信</a>
       {% endif %}
       {% else %}
-      <a href="/member">ホーム</a>{% if feature_enabled('safety') %}<a href="/work-log">出退勤・点呼</a>{% endif %}{% if feature_enabled('deliveries') %}<a href="/deliveries">配達入力</a>{% endif %}{% if feature_enabled('inspection') %}<a href="/inspection-sheets">点検表</a>{% endif %}{% if feature_enabled('rewards') %}<a href="/rewards">報酬</a>{% endif %}{% if feature_enabled('vehicle') %}<a href="/vehicles">車両</a>{% endif %}{% if feature_enabled('holidays') %}<a href="/holidays">休み希望</a>{% endif %}{% if feature_enabled('shifts') %}<a href="/member/shifts">シフト</a>{% endif %}{% if feature_enabled('issues') %}<a href="/vehicle-issues">不具合</a>{% endif %}<a href="/settings">設定</a>
+      <a href="/member">ホーム</a>{% if feature_enabled('safety') %}<a href="/work-log">出退勤・点呼</a>{% endif %}{% if feature_enabled('deliveries') %}<a href="/deliveries">配達入力</a>{% endif %}{% if feature_enabled('inspection') %}<a href="/inspection-sheets">点検表</a>{% endif %}{% if feature_enabled('rewards') %}<a href="/member/results">実績カレンダー</a>{% endif %}{% if feature_enabled('vehicle') %}<a href="/vehicles">車両</a>{% endif %}{% if feature_enabled('holidays') %}<a href="/holidays">休み希望</a>{% endif %}{% if feature_enabled('shifts') %}<a href="/member/shifts">シフト</a>{% endif %}{% if feature_enabled('issues') %}<a href="/vehicle-issues">不具合</a>{% endif %}<a href="/settings">設定</a>
       {% endif %}
       <a href="/logout">ログアウト</a>
     </nav>

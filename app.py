@@ -38,7 +38,7 @@ if DATABASE_URL.startswith("postgres://"):
 USE_POSTGRES = bool(DATABASE_URL)
 DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "3"))
 DB_INIT_RETRY_SECONDS = int(os.getenv("DB_INIT_RETRY_SECONDS", "30"))
-SCHEMA_VERSION = "2026-05-19-start-work-speed-v1"
+SCHEMA_VERSION = "2026-05-19-member-menu-holiday-rules-v1"
 DB_INIT_ON_STARTUP = os.getenv("DB_INIT_ON_STARTUP", "0" if USE_POSTGRES else "1").lower() in {"1", "true", "yes", "on"}
 APP_NAME = "SPARKLE DRIVE"
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -1423,6 +1423,9 @@ def _init_db_schema():
         ensure_column(conn, "companies", "contract_start_date", "TEXT DEFAULT ''")
         ensure_column(conn, "companies", "next_renewal_date", "TEXT DEFAULT ''")
         ensure_column(conn, "companies", "memo", "TEXT DEFAULT ''")
+        ensure_column(conn, "companies", "holiday_deadline_day", "INTEGER NOT NULL DEFAULT 25")
+        ensure_column(conn, "companies", "holiday_limit_days", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "companies", "holiday_limit_unlimited", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "users", "phone", "TEXT DEFAULT ''")
         ensure_column(conn, "users", "email", "TEXT DEFAULT ''")
         ensure_column(conn, "users", "company_id", "INTEGER NOT NULL DEFAULT 1")
@@ -3373,13 +3376,31 @@ def vehicle_alert(vehicle, today: Optional[date] = None):
     }
 
 
-def holiday_deadline_alert(today: Optional[date] = None):
+def holiday_rule_for_company(company_id: int):
+    company = query_one(
+        "SELECT holiday_deadline_day, holiday_limit_days, holiday_limit_unlimited FROM companies WHERE id=?",
+        (company_id,),
+    )
+    deadline = int_value(row_value(company, "holiday_deadline_day", 25), 25)
+    if deadline < 1 or deadline > 31:
+        deadline = 25
+    limit_days = max(int_value(row_value(company, "holiday_limit_days", 0)), 0)
+    unlimited = bool(int_value(row_value(company, "holiday_limit_unlimited", 1), 1))
+    return {"deadline_day": deadline, "limit_days": limit_days, "limit_unlimited": unlimited}
+
+
+def holiday_deadline_alert(today: Optional[date] = None, company_id: Optional[int] = None):
     today = today or app_today()
-    if today.day > 25:
-        return {"level": "ended", "message": "今月分の休み希望締切は終了しました"}
-    if today.day >= 20:
-        return {"level": "near", "message": "休み希望の締切が近いです"}
-    return {"level": "", "message": ""}
+    rule = holiday_rule_for_company(company_id) if company_id else {"deadline_day": 25}
+    deadline_day = int_value(rule.get("deadline_day", 25), 25)
+    if today.day > deadline_day:
+        return {"level": "ended", "message": "今月の休み希望締切は過ぎています。変更が必要な場合は管理者に相談してください。", "deadline_day": deadline_day, "days_left": 0}
+    days_left = deadline_day - today.day
+    if days_left <= 3:
+        return {"level": "near", "message": f"休み希望の締切まであと{days_left}日です。", "deadline_day": deadline_day, "days_left": days_left}
+    if today.day >= max(deadline_day - 5, 1):
+        return {"level": "near", "message": "休み希望の締切が近いです", "deadline_day": deadline_day, "days_left": days_left}
+    return {"level": "", "message": "", "deadline_day": deadline_day, "days_left": days_left}
 
 
 def holiday_submission_status(company_id: int, target_month: Optional[date] = None):
@@ -3400,7 +3421,7 @@ def holiday_submission_status(company_id: int, target_month: Optional[date] = No
         "member_count": member_count,
         "submitted_count": submitted,
         "missing_count": max(member_count - submitted, 0),
-        "deadline_alert": holiday_deadline_alert(),
+        "deadline_alert": holiday_deadline_alert(company_id=company_id),
     }
 
 
@@ -3666,7 +3687,15 @@ def member_month_calendar(company_id: int, user_id: int, month_text: Optional[st
                 }
             )
         weeks.append(cells)
-    return {"start": start, "end": end, "target_month": start.strftime("%Y-%m"), "weeks": weeks}
+    month_summary = monthly_reward_summary(user_id, start, company_id)
+    return {
+        "start": start,
+        "end": end,
+        "target_month": start.strftime("%Y-%m"),
+        "target_label": f"{start.year}年{start.month}月",
+        "weeks": weeks,
+        "month_summary": month_summary,
+    }
 
 
 def logically_delete_work_day(company_id: int, user_id: int, work_date: str, actor, reason: str):
@@ -4628,6 +4657,7 @@ def admin_settings_page(
             "feature_prices": feature_price_rows(),
             "company_monthly_amount": monthly_amount_for_company(feature_target_id),
             "company_statuses": COMPANY_STATUSES,
+            "holiday_rule": holiday_rule_for_company(company_id),
             "message": message,
             "error": error,
         },
@@ -4685,6 +4715,42 @@ def update_member_login(
     else:
         execute("UPDATE users SET username=?, email=? WHERE id=? AND role='member' AND company_id=?", (username, email, member_id, company_id))
     return RedirectResponse("/admin/settings?message=" + quote("メンバーのログイン情報を更新しました"), status_code=303)
+
+
+@app.post("/admin/settings/holiday-rules")
+def update_holiday_rules(
+    holiday_deadline_day: int = Form(25),
+    holiday_limit_days: int = Form(0),
+    holiday_limit_unlimited: Optional[str] = Form(None),
+    user=Depends(require_admin),
+):
+    require_feature(user, "holidays")
+    company_id = company_id_for(user)
+    deadline = min(max(int_value(holiday_deadline_day, 25), 1), 31)
+    limit_days = max(int_value(holiday_limit_days, 0), 0)
+    unlimited = 1 if holiday_limit_unlimited == "1" else 0
+    before = query_one("SELECT holiday_deadline_day, holiday_limit_days, holiday_limit_unlimited FROM companies WHERE id=?", (company_id,))
+    with db() as conn:
+        conn.execute(
+            """UPDATE companies
+               SET holiday_deadline_day=?, holiday_limit_days=?, holiday_limit_unlimited=?
+               WHERE id=?""",
+            (deadline, limit_days, unlimited, company_id),
+        )
+        after = conn.execute("SELECT holiday_deadline_day, holiday_limit_days, holiday_limit_unlimited FROM companies WHERE id=?", (company_id,)).fetchone()
+        audit_log(
+            company_id,
+            user,
+            "settings.holiday_rules_update",
+            "companies",
+            company_id,
+            "Holiday request rules updated",
+            before=row_to_dict(before),
+            after=row_to_dict(after),
+            conn=conn,
+        )
+        conn.commit()
+    return RedirectResponse("/admin/settings?message=" + quote("休み希望ルールを更新しました"), status_code=303)
 
 
 @app.post("/admin/settings/company")
@@ -5749,7 +5815,7 @@ def member_home(request: Request, user=Depends(require_user)):
     work_state = today_work_state(user["id"], company_id, today_s)
     selected_vehicle = vehicle_for_user(user, company_id)
     selected_vehicle_alert = vehicle_alert(selected_vehicle)
-    holiday_alert = holiday_deadline_alert(now_dt.date())
+    holiday_alert = holiday_deadline_alert(now_dt.date(), company_id)
     last_odometer = latest_vehicle_odometer(company_id, row_value(selected_vehicle, "id")) or latest_odometer_for_user(user["id"], company_id)
     company = query_one("SELECT memo FROM companies WHERE id=?", (company_id,))
     company_notice = (row_value(company, "memo", "") or "").strip()
@@ -7041,12 +7107,13 @@ def update_vehicle_issue_status(issue_id: int, status: str = Form(...), user=Dep
 
 
 @app.get("/holidays", response_class=HTMLResponse)
-def holidays_page(request: Request, user=Depends(require_user)):
+def holidays_page(request: Request, error: str = "", message: str = "", user=Depends(require_user)):
     require_feature(user, "holidays")
     ym = request.query_params.get("ym")
     start, end = month_bounds(ym)
+    company_id = company_id_for(user)
+    holiday_rule = holiday_rule_for_company(company_id)
     if user["role"] == "admin":
-        company_id = company_id_for(user)
         rows = query_all(
             """SELECT h.*, u.name FROM holiday_requests h JOIN users u ON u.id=h.user_id
                WHERE h.company_id=? AND h.request_date BETWEEN ? AND ? ORDER BY h.request_date, u.name LIMIT 300""",
@@ -7055,8 +7122,12 @@ def holidays_page(request: Request, user=Depends(require_user)):
     else:
         rows = query_all(
             "SELECT * FROM holiday_requests WHERE user_id=? AND company_id=? AND request_date BETWEEN ? AND ? ORDER BY request_date",
-            (user["id"], company_id_for(user), start.isoformat(), end.isoformat()),
+            (user["id"], company_id, start.isoformat(), end.isoformat()),
         )
+    selected_count = len({row["request_date"] for row in rows}) if user["role"] != "admin" else 0
+    limit_days = int_value(holiday_rule["limit_days"])
+    limit_unlimited = bool(holiday_rule["limit_unlimited"])
+    remaining_days = None if limit_unlimited else max(limit_days - selected_count, 0)
     holiday_days = simple_japanese_holidays(start.year)
     rows_by_date = {}
     for row in rows:
@@ -7070,8 +7141,13 @@ def holidays_page(request: Request, user=Depends(require_user)):
             "days": calendar_days_for_month(start),
             "rows_by_date": rows_by_date,
             "holiday_dates": {d.isoformat() for d in holiday_days},
-            "holiday_alert": holiday_deadline_alert(),
-            "holiday_status": holiday_submission_status(company_id_for(user), start) if user["role"] == "admin" else None,
+            "holiday_alert": holiday_deadline_alert(company_id=company_id),
+            "holiday_status": holiday_submission_status(company_id, start) if user["role"] == "admin" else None,
+            "holiday_rule": holiday_rule,
+            "selected_count": selected_count,
+            "remaining_days": remaining_days,
+            "error": error,
+            "message": message,
         },
     )
 
@@ -7081,12 +7157,33 @@ def save_holiday(request_date: str = Form(...), reason: str = Form(""), user=Dep
     require_feature(user, "holidays")
     if user["role"] == "admin":
         raise HTTPException(status_code=403, detail="メンバーとして入力してください")
+    parsed = parse_iso_date(request_date)
+    if not parsed:
+        return RedirectResponse("/holidays?error=" + quote("日付が正しくありません"), status_code=303)
+    company_id = company_id_for(user)
+    rule = holiday_rule_for_company(company_id)
+    if not bool(rule["limit_unlimited"]):
+        start = parsed.replace(day=1)
+        end = (start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)) - timedelta(days=1)
+        count_row = query_one(
+            """SELECT COUNT(DISTINCT request_date) AS count
+               FROM holiday_requests
+               WHERE company_id=? AND user_id=? AND request_date BETWEEN ? AND ? AND request_date<>?""",
+            (company_id, user["id"], start.isoformat(), end.isoformat(), request_date),
+        )
+        selected_count = int_value(row_value(count_row, "count", 0)) + 1
+        limit_days = int_value(rule["limit_days"])
+        if limit_days and selected_count > limit_days:
+            return RedirectResponse(
+                "/holidays?ym=" + parsed.strftime("%Y-%m") + "&error=" + quote(f"休み希望は月{limit_days}日までです。選択日数を減らしてください。"),
+                status_code=303,
+            )
     execute(
         """INSERT INTO holiday_requests(company_id, user_id, request_date, reason, created_at) VALUES (?,?,?,?,?)
            ON CONFLICT(user_id, request_date) DO UPDATE SET reason=excluded.reason, company_id=excluded.company_id""",
-        (company_id_for(user), user["id"], request_date, reason, datetime.now().isoformat(timespec="seconds")),
+        (company_id, user["id"], request_date, reason, datetime.now().isoformat(timespec="seconds")),
     )
-    return RedirectResponse("/holidays", status_code=303)
+    return RedirectResponse("/holidays?ym=" + parsed.strftime("%Y-%m") + "&message=" + quote("休み希望を保存しました"), status_code=303)
 
 
 @app.get("/admin/shifts")

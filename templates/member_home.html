@@ -110,11 +110,7 @@
       <details class="flow-menu-category">
         <summary><span>報</span><b>売上・報酬</b></summary>
         <div class="flow-mini-grid">
-          <a class="flow-mini-button reward" href="/mobile/work/end/complete?day={{ today }}"><span>今</span><b>今日の報酬</b></a>
-          <a class="flow-mini-button reward" href="/rewards"><span>月</span><b>今月の報酬</b></a>
-          <a class="flow-mini-button reward" href="/my-room"><span>単</span><b>単価確認</b></a>
           <a class="flow-mini-button reward" href="/member/results"><span>実</span><b>実績カレンダー</b></a>
-          <a class="flow-mini-button reward" href="/member/results"><span>数</span><b>月間配達数</b></a>
           <a class="flow-mini-button reward" href="/member/result-corrections"><span>履</span><b>修正履歴</b></a>
         </div>
       </details>
@@ -122,10 +118,8 @@
       <details class="flow-menu-category">
         <summary><span>休</span><b>シフト・休み</b></summary>
         <div class="flow-mini-grid">
-          {% if feature_enabled('shifts') %}<a class="flow-mini-button" href="/member/shifts"><span>今</span><b>今日のシフト</b></a>{% endif %}
           {% if feature_enabled('shifts') %}<a class="flow-mini-button" href="/member/shifts"><span>月</span><b>今月のシフト</b></a>{% endif %}
           {% if feature_enabled('holidays') %}<a class="flow-mini-button" href="/holidays"><span>休</span><b>休み希望</b></a>{% endif %}
-          {% if feature_enabled('holidays') %}<a class="flow-mini-button info" href="/holidays"><span>締</span><b>締切確認</b></a>{% endif %}
         </div>
       </details>
       {% if feature_enabled('vehicle') %}
@@ -145,7 +139,6 @@
         <div class="flow-mini-grid">
           <a class="flow-mini-button" href="/my-room"><span>情</span><b>自分の情報</b></a>
           <a class="flow-mini-button" href="/my-room"><span>連</span><b>連絡先変更</b></a>
-          <a class="flow-mini-button" href="/my-room"><span>単</span><b>単価確認</b></a>
           <a class="flow-mini-button" href="/settings"><span>鍵</span><b>ログイン情報</b></a>
         </div>
       </details>
@@ -186,7 +179,7 @@
       {% if feature_enabled('inspection') %}<a class="mobile-menu-item" href="/inspection-sheets"><span>点</span><b>点検表</b></a>{% endif %}
       {% if feature_enabled('shifts') %}<a class="mobile-menu-item" href="/member/shifts"><span>シ</span><b>シフト</b></a>{% endif %}
       {% if feature_enabled('holidays') %}<a class="mobile-menu-item" href="/holidays"><span>休</span><b>休み希望</b></a>{% endif %}
-      {% if feature_enabled('rewards') %}<a class="mobile-menu-item" href="/rewards"><span>売</span><b>売上・報酬</b></a>{% endif %}
+      {% if feature_enabled('rewards') %}<a class="mobile-menu-item" href="/member/results"><span>実</span><b>実績カレンダー</b></a>{% endif %}
       {% if feature_enabled('issues') %}<a class="mobile-menu-item" href="/vehicle-issues"><span>不</span><b>不具合</b></a>{% endif %}
       <a class="mobile-menu-item" href="/settings"><span>設</span><b>設定</b></a>
     </div>
@@ -244,7 +237,7 @@
   <div class="actions home-actions">
     {% if feature_enabled('inspection') %}<a class="button primary" href="/inspection-sheets">点検表を撮影する</a>{% endif %}
     {% if feature_enabled('deliveries') %}<a class="button primary" href="/deliveries">配達個数を入力</a>{% endif %}
-    {% if feature_enabled('rewards') %}<a class="button" href="/rewards">月間報酬を見る</a>{% endif %}
+    {% if feature_enabled('rewards') %}<a class="button" href="/member/results">実績カレンダーを見る</a>{% endif %}
     {% if feature_enabled('shifts') %}<a class="button" href="/member/shifts">シフトを見る</a>{% endif %}
   </div>
 </div>

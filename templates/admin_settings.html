@@ -109,6 +109,26 @@
   {% endif %}
 </section>
 
+{% if feature_enabled('holidays') %}
+<section class="panel settings-panel" id="holiday-rules">
+  <h2>休み希望ルール</h2>
+  <p class="hint">この会社のメンバーに表示される休み希望の締切日と、1ヶ月に出せる希望日数を設定します。</p>
+  <form method="post" action="/admin/settings/holiday-rules" class="formgrid" onsubmit="return confirm('休み希望ルールを保存しますか？');">
+    <label>休み希望締切日
+      <input type="number" name="holiday_deadline_day" min="1" max="31" value="{{ holiday_rule.deadline_day or 25 }}">
+    </label>
+    <label>休み希望日数上限
+      <input type="number" name="holiday_limit_days" min="0" value="{{ holiday_rule.limit_days or 0 }}" placeholder="例：3">
+    </label>
+    <label class="feature-card">
+      <input type="checkbox" name="holiday_limit_unlimited" value="1" {{ 'checked' if holiday_rule.limit_unlimited else '' }}>
+      <span><b>制限なし</b><small>チェック中は日数上限を使いません。</small></span>
+    </label>
+    <button class="primary">休み希望ルールを保存</button>
+  </form>
+</section>
+{% endif %}
+
 {% if platform_admin %}
 <section class="panel settings-panel">
   <h2>機能別 月額料金</h2>

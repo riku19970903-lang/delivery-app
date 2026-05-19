@@ -14,6 +14,20 @@
     </form>
   </section>
 
+  <section class="panel monthly-result-summary">
+    <p class="flow-eyebrow">{{ calendar_data.target_label }}</p>
+    <div class="flow-summary-grid">
+      <div class="flow-summary-card">
+        <span>現在の配達完了数</span>
+        <b>{{ "{:,}".format(calendar_data.month_summary.completed_total or 0) }}個</b>
+      </div>
+      <div class="flow-summary-card reward">
+        <span>現在の今月の売上 / 報酬目安</span>
+        <b>{{ "{:,}".format(calendar_data.month_summary.net_total or 0) }}円</b>
+      </div>
+    </div>
+  </section>
+
   <section class="results-calendar">
     <div class="results-week-head">
       <span>日</span><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span>土</span>
@@ -45,7 +59,6 @@
   <section class="flow-mini-panel">
     <div class="flow-mini-grid">
       <a class="flow-mini-button" href="/member"><span>ホ</span><b>ホーム</b></a>
-      <a class="flow-mini-button reward" href="/rewards"><span>報</span><b>報酬</b></a>
       <a class="flow-mini-button reward" href="/member/result-corrections"><span>履</span><b>修正履歴</b></a>
     </div>
   </section>
