@@ -38,7 +38,7 @@ if DATABASE_URL.startswith("postgres://"):
 USE_POSTGRES = bool(DATABASE_URL)
 DB_CONNECT_TIMEOUT = int(os.getenv("DB_CONNECT_TIMEOUT", "3"))
 DB_INIT_RETRY_SECONDS = int(os.getenv("DB_INIT_RETRY_SECONDS", "30"))
-SCHEMA_VERSION = "2026-05-19-member-menu-holiday-rules-v1"
+SCHEMA_VERSION = "2026-05-19-start-work-speed-v1"
 DB_INIT_ON_STARTUP = os.getenv("DB_INIT_ON_STARTUP", "0" if USE_POSTGRES else "1").lower() in {"1", "true", "yes", "on"}
 APP_NAME = "SPARKLE DRIVE"
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -94,6 +94,8 @@ DB_INIT_DONE = False
 DB_INIT_ERROR = None
 DB_INIT_LAST_ATTEMPT = 0.0
 FEATURE_CACHE = {}
+HOLIDAY_RULE_COLUMNS_READY = False
+HOLIDAY_RULE_COLUMNS_LOCK = Lock()
 
 
 def elapsed_ms(start: float) -> float:
@@ -1766,7 +1768,12 @@ def schema_already_initialized():
                 "SELECT meta_value FROM app_metadata WHERE meta_key=?",
                 ("schema_version",),
             ).fetchone()
-        return row_value(row, "meta_value", "") == SCHEMA_VERSION
+        if row_value(row, "meta_value", "") == SCHEMA_VERSION:
+            return True
+        if current_schema_shape_ok():
+            mark_schema_initialized()
+            return True
+        return False
     except Exception:
         if current_schema_shape_ok():
             mark_schema_initialized()
@@ -3376,11 +3383,37 @@ def vehicle_alert(vehicle, today: Optional[date] = None):
     }
 
 
+def ensure_holiday_rule_columns():
+    global HOLIDAY_RULE_COLUMNS_READY
+    if HOLIDAY_RULE_COLUMNS_READY:
+        return True
+    with HOLIDAY_RULE_COLUMNS_LOCK:
+        if HOLIDAY_RULE_COLUMNS_READY:
+            return True
+        try:
+            with db() as conn:
+                ensure_column(conn, "companies", "holiday_deadline_day", "INTEGER NOT NULL DEFAULT 25")
+                ensure_column(conn, "companies", "holiday_limit_days", "INTEGER NOT NULL DEFAULT 0")
+                ensure_column(conn, "companies", "holiday_limit_unlimited", "INTEGER NOT NULL DEFAULT 1")
+                conn.commit()
+            HOLIDAY_RULE_COLUMNS_READY = True
+            return True
+        except Exception:
+            logger.exception("Holiday rule columns could not be ensured")
+            return False
+
+
 def holiday_rule_for_company(company_id: int):
-    company = query_one(
-        "SELECT holiday_deadline_day, holiday_limit_days, holiday_limit_unlimited FROM companies WHERE id=?",
-        (company_id,),
-    )
+    if not ensure_holiday_rule_columns():
+        return {"deadline_day": 25, "limit_days": 0, "limit_unlimited": True}
+    try:
+        company = query_one(
+            "SELECT holiday_deadline_day, holiday_limit_days, holiday_limit_unlimited FROM companies WHERE id=?",
+            (company_id,),
+        )
+    except Exception:
+        logger.exception("Holiday rule lookup failed")
+        return {"deadline_day": 25, "limit_days": 0, "limit_unlimited": True}
     deadline = int_value(row_value(company, "holiday_deadline_day", 25), 25)
     if deadline < 1 or deadline > 31:
         deadline = 25
@@ -4726,6 +4759,7 @@ def update_holiday_rules(
 ):
     require_feature(user, "holidays")
     company_id = company_id_for(user)
+    ensure_holiday_rule_columns()
     deadline = min(max(int_value(holiday_deadline_day, 25), 1), 31)
     limit_days = max(int_value(holiday_limit_days, 0), 0)
     unlimited = 1 if holiday_limit_unlimited == "1" else 0
